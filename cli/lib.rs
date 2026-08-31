@@ -5,7 +5,10 @@ use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
 use thunder::types::{Address, Txid};
-use thunder_app_rpc_api::RpcClient;
+use thunder_app_rpc_api::{
+    node::{PrivateRpcClient as _, RpcClient as _},
+    wallet::RpcClient as _,
+};
 use tracing_subscriber::layer::SubscriberExt as _;
 
 struct JsonParser<T>(PhantomData<T>);
@@ -27,6 +30,12 @@ impl<T> JsonParser<T> {
 pub enum Command {
     /// Get balance in sats
     Balance,
+    /// Connect a block for which a BMM request was included in the specified
+    /// mainchain block. The block is the JSON returned by `get-block-template`.
+    ConnectBlock {
+        block: String,
+        main_block_hash: bitcoin::BlockHash,
+    },
     /// Connect to a peer
     ConnectPeer { addr: SocketAddr },
     /// Deposit to address
@@ -71,6 +80,8 @@ pub enum Command {
     GetBlock {
         block_hash: thunder::types::BlockHash,
     },
+    /// Assemble a block to blind merge mine, without requesting BMM for it
+    GetBlockTemplate,
     /// Get mainchain blocks that commit to a specified block hash
     GetBmmInclusions {
         block_hash: thunder::types::BlockHash,
@@ -95,6 +106,11 @@ pub enum Command {
     GetWalletUtxos,
     /// Get the current block count
     GetBlockcount,
+    /// Invalidate a block, potentially re-orging to a valid ancestor of the
+    /// current tip.
+    InvalidateBlock {
+        block_hash: thunder::types::BlockHash,
+    },
     /// Get the height of the latest failed withdrawal bundle
     LatestFailedWithdrawalBundleHeight,
     /// List peers
@@ -165,6 +181,15 @@ where
             let balance = rpc_client.balance().await?;
             serde_json::to_string_pretty(&balance)?
         }
+        Command::ConnectBlock {
+            block,
+            main_block_hash,
+        } => {
+            let block = serde_json::from_str(&block)?;
+            let accepted =
+                rpc_client.connect_block(block, main_block_hash).await?;
+            format!("{accepted}")
+        }
         Command::ConnectPeer { addr } => {
             let () = rpc_client.connect_peer(addr).await?;
             String::default()
@@ -224,6 +249,10 @@ where
             let block_hash = rpc_client.get_best_sidechain_block_hash().await?;
             serde_json::to_string_pretty(&block_hash)?
         }
+        Command::GetBlockTemplate => {
+            let template = rpc_client.get_block_template().await?;
+            serde_json::to_string_pretty(&template)?
+        }
         Command::GetBmmInclusions { block_hash } => {
             let bmm_inclusions =
                 rpc_client.get_bmm_inclusions(block_hash).await?;
@@ -260,6 +289,10 @@ where
             let blockcount = rpc_client.getblockcount().await?;
             format!("{blockcount}")
         }
+        Command::InvalidateBlock { block_hash } => {
+            let () = rpc_client.invalidate_block(block_hash).await?;
+            String::default()
+        }
         Command::LatestFailedWithdrawalBundleHeight => {
             let height =
                 rpc_client.latest_failed_withdrawal_bundle_height().await?;
@@ -283,9 +316,12 @@ where
             serde_json::to_string_pretty(&withdrawal_bundle)?
         }
         Command::OpenApiSchema => {
-            let openapi =
-                <thunder_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
-            openapi.to_pretty_json()?
+            use utoipa::OpenApi as _;
+            let mut schema = thunder_app_rpc_api::open_api::RpcDoc::openapi();
+            schema.merge(thunder_app_rpc_api::node::PrivateRpcDoc::openapi());
+            schema.merge(thunder_app_rpc_api::node::RpcDoc::openapi());
+            schema.merge(thunder_app_rpc_api::wallet::RpcDoc::openapi());
+            schema.to_pretty_json()?
         }
         Command::RemoveFromMempool { txid } => {
             let () = rpc_client.remove_from_mempool(txid).await?;
