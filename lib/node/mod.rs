@@ -20,9 +20,10 @@ use crate::{
     state::State,
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
-        Authorized, AuthorizedTransaction, BlockHash, BmmResult, Body,
-        FilledTransaction, GetValue, Header, Network, OutPoint, OutPointKey,
-        Output, SpentOutput, Tip, Transaction, Txid, WithdrawalBundle,
+        Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents,
+        BmmResult, Body, FilledTransaction, GetValue, Header, Network,
+        OutPoint, OutPointKey, Output, SpentOutput, Tip, Transaction, Txid,
+        WithdrawalBundle,
         net::Peer,
         proto::{self, mainchain},
     },
@@ -346,6 +347,17 @@ where
     pub fn get_header(&self, block_hash: BlockHash) -> Result<Header, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
         Ok(self.archive.get_header(&txn, block_hash)?)
+    }
+
+    /// Get the coin movements that the block applied outside its body
+    pub fn get_block_index_events(
+        &self,
+        block_hash: BlockHash,
+    ) -> Result<BlockIndexEvents, Error> {
+        let rotxn = self.env.read_txn().map_err(EnvError::from)?;
+        let height = self.archive.get_height(&rotxn, block_hash)?;
+        let events = self.state.get_block_index_events(&rotxn, height)?;
+        Ok(events)
     }
 
     /// Get the block hash at the specified height in the current chain,
