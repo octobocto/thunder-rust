@@ -4,7 +4,7 @@ use transitive::Transitive;
 
 use crate::{
     archive, mempool, net, state,
-    types::{AmountOverflowError, AmountUnderflowError, proto},
+    types::{AmountOverflowError, AmountUnderflowError, BlockHash, proto},
 };
 
 pub mod mainchain_task {
@@ -178,6 +178,8 @@ pub enum Error {
     NetTask(#[source] Box<net_task::Error>),
     #[error("No CUSF mainchain wallet client")]
     NoCusfMainchainWalletClient,
+    #[error("block {block_hash} is not in the current chain")]
+    NotInCurrentChain { block_hash: BlockHash },
     #[error("peer info stream closed")]
     PeerInfoRxClosed,
     #[error("Receive mainchain task response cancelled")]
