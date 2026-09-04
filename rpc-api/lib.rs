@@ -102,6 +102,16 @@ pub mod node {
         pub bundle_spends: Vec<(OutPoint, M6id)>,
     }
 
+    /// One transaction the mempool holds. A block body carries no txid and no
+    /// size, so both come with it.
+    #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+    pub struct MempoolTx {
+        pub txid: Txid,
+        /// Canonical size in bytes
+        pub size: u64,
+        pub tx: Transaction,
+    }
+
     #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
     pub struct GetTransactionResponse {
         pub tx: Transaction,
@@ -219,6 +229,10 @@ pub mod node {
         /// List peers
         #[method(name = "list_peers")]
         async fn list_peers(&self) -> RpcResult<Vec<Peer>>;
+
+        /// List the transactions the mempool holds
+        #[method(name = "list_mempool")]
+        async fn list_mempool(&self) -> RpcResult<Vec<MempoolTx>>;
 
         /// List all UTXOs
         #[method(name = "list_utxos")]
