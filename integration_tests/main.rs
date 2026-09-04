@@ -8,6 +8,7 @@ mod block_template;
 mod ibd;
 mod integration_test;
 mod list_mempool;
+mod receive_address;
 mod setup;
 mod unknown_withdrawal;
 mod util;
