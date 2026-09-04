@@ -476,6 +476,10 @@ impl Wallet {
         })
     }
 
+    /// Derives an address the wallet has never used.
+    ///
+    /// A change output takes one of these: reusing a change address across
+    /// transactions ties them together.
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut txn = self.env.write_txn().map_err(EnvError::from)?;
         let (last_index, _) = self
@@ -496,6 +500,50 @@ impl Wallet {
             .map_err(DbError::from)?;
         txn.commit().map_err(RwTxnError::from)?;
         Ok(address)
+    }
+
+    /// Returns the address to receive at, and derives a new one only once the
+    /// current one receives.
+    ///
+    /// A caller that asks on a timer takes this one. `build_block_template`
+    /// asks for a coinbase address on every call, and a fresh address each
+    /// time costs a row in two databases for as long as the node runs.
+    pub fn get_receive_address(&self) -> Result<Address, Error> {
+        {
+            let rotxn = self.env.read_txn().map_err(EnvError::from)?;
+            let last =
+                self.index_to_address.last(&rotxn).map_err(DbError::from)?;
+            if let Some((_, address)) = last
+                && !self.address_received(&rotxn, &address)?
+            {
+                return Ok(address);
+            }
+        }
+        self.get_new_address()
+    }
+
+    /// True when any output the wallet holds or held pays this address.
+    ///
+    /// The wallet stores only its own coins, so both scans are over the
+    /// wallet's own history rather than the chain's.
+    fn address_received(
+        &self,
+        rotxn: &RoTxn,
+        address: &Address,
+    ) -> Result<bool, Error> {
+        let mut utxos = self.utxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, output)) = utxos.next().map_err(DbError::from)? {
+            if output.address == *address {
+                return Ok(true);
+            }
+        }
+        let mut stxos = self.stxos.iter(rotxn).map_err(DbError::from)?;
+        while let Some((_, spent)) = stxos.next().map_err(DbError::from)? {
+            if spent.output.address == *address {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Gets the latest generated address.
@@ -584,6 +632,50 @@ impl Watchable<()> for Wallet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_receive_address() -> anyhow::Result<()> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let test_dir =
+            std::env::temp_dir().join(format!("thunder_test_receive_{nanos}"));
+        if test_dir.exists() {
+            let _unused = std::fs::remove_dir_all(&test_dir);
+        }
+
+        let wallet = Wallet::new(&test_dir)?;
+        wallet.set_seed(&[1u8; 64])?;
+
+        // An address that never received comes back every time.
+        let first = wallet.get_receive_address()?;
+        for _ in 0..10 {
+            assert_eq!(wallet.get_receive_address()?, first);
+        }
+        assert_eq!(wallet.get_addresses()?.len(), 1);
+
+        // A fresh address is still fresh, so a change output never reuses one.
+        let fresh = wallet.get_new_address()?;
+        assert_ne!(fresh, first);
+        assert_eq!(wallet.get_addresses()?.len(), 2);
+
+        // The receive address moves on once it receives.
+        let outpoint = OutPoint::Regular {
+            txid: [0; 32].into(),
+            vout: 0,
+        };
+        let output = Output {
+            address: wallet.get_receive_address()?,
+            content: OutputContent::Value(bitcoin::Amount::from_sat(1000)),
+        };
+        wallet.put_utxos(&HashMap::from([(outpoint, output)]))?;
+        let second = wallet.get_receive_address()?;
+        assert_ne!(second, first);
+        assert_eq!(wallet.get_receive_address()?, second);
+
+        let _unused = std::fs::remove_dir_all(&test_dir);
+        Ok(())
+    }
 
     #[test]
     fn test_get_or_generate_last_address() -> anyhow::Result<()> {
