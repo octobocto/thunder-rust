@@ -132,6 +132,52 @@ pub struct BlockIndexEvents {
     pub bundle_spends: Vec<(transaction::OutPoint, M6id)>,
 }
 
+/// One transaction of a block, with the fields its body omits
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexTx {
+    pub txid: Txid,
+    /// Canonical size in bytes
+    pub size: u64,
+    /// Borsh encoding, as hex
+    pub raw: String,
+}
+
+/// One output a mainchain deposit created
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexDeposit {
+    pub outpoint: transaction::OutPoint,
+    pub output: transaction::Output,
+}
+
+/// One output a withdrawal bundle removed, with the bundle that took it
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndexSpend {
+    pub outpoint: transaction::OutPoint,
+    pub m6id: M6id,
+}
+
+/// Everything about a block that its body does not carry
+//  Each pair is a named struct: a tuple of ref schemas does not compose.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct BlockIndex {
+    /// Transactions in body order
+    pub txs: Vec<BlockIndexTx>,
+    /// Outputs that mainchain deposits created
+    pub deposits: Vec<BlockIndexDeposit>,
+    /// Outputs that a withdrawal bundle removed
+    pub bundle_spends: Vec<BlockIndexSpend>,
+}
+
+/// One transaction the mempool holds
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MempoolTx {
+    /// Blake3 over the canonical encoding
+    pub txid: Txid,
+    /// Canonical size in bytes
+    pub size: u64,
+    pub tx: transaction::Transaction,
+}
+
 impl BlockIndexEvents {
     /// True when the block moved no coins outside its body
     pub fn is_empty(&self) -> bool {

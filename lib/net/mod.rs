@@ -674,12 +674,16 @@ impl Net {
 
 #[cfg(test)]
 mod test {
-<<<<<<< HEAD
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
     use heed::types::{SerdeBincode, Unit};
     use sneed::DatabaseUnique;
 
     use crate::{
-        net::{PeerAddress, ensure_seed_peers, seed_peer_addrs},
+        net::{
+            PeerAddress, ensure_seed_peers, resolve_peer_address,
+            seed_peer_addrs,
+        },
         types::Network,
     };
 
@@ -725,10 +729,9 @@ mod test {
         assert_eq!(
             known_peers.len(&rotxn)?,
             seed_peer_addrs(network).len() as u64
-=======
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-    use crate::{net::resolve_peer_address, types::net::PeerAddress};
+        );
+        Ok(())
+    }
 
     /// A seed names a host and a port, and the resolver keeps both.
     #[tokio::test]
@@ -741,7 +744,6 @@ mod test {
                 .ip_addrs()
                 .any(|addr| addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
                     || addr == IpAddr::V6(Ipv6Addr::LOCALHOST))
->>>>>>> fork/2026-09-06-alphanet-seed
         );
         Ok(())
     }

@@ -187,12 +187,12 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
     async fn get_block_index(
         &self,
         block_hash: thunder::types::BlockHash,
-    ) -> RpcResult<rpc_api::node::GetBlockIndexResponse> {
+    ) -> RpcResult<thunder::types::BlockIndex> {
         let body = self.app.node.get_body(block_hash).map_err(custom_err)?;
         let txs = body
             .transactions
             .iter()
-            .map(|tx| rpc_api::node::BlockIndexTx {
+            .map(|tx| thunder::types::BlockIndexTx {
                 txid: tx.txid(),
                 size: tx.canonical_size(),
                 raw: const_hex::encode(tx.canonical_encoding()),
@@ -203,10 +203,24 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .node
             .get_block_index_events(block_hash)
             .map_err(custom_err)?;
-        Ok(rpc_api::node::GetBlockIndexResponse {
+        Ok(thunder::types::BlockIndex {
             txs,
-            deposits: events.deposits,
-            bundle_spends: events.bundle_spends,
+            deposits: events
+                .deposits
+                .into_iter()
+                .map(|(outpoint, output)| thunder::types::BlockIndexDeposit {
+                    outpoint,
+                    output,
+                })
+                .collect(),
+            bundle_spends: events
+                .bundle_spends
+                .into_iter()
+                .map(|(outpoint, m6id)| thunder::types::BlockIndexSpend {
+                    outpoint,
+                    m6id,
+                })
+                .collect(),
         })
     }
 
@@ -287,13 +301,13 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         Ok(peers)
     }
 
-    async fn list_mempool(&self) -> RpcResult<Vec<rpc_api::node::MempoolTx>> {
+    async fn list_mempool(&self) -> RpcResult<Vec<thunder::types::MempoolTx>> {
         let txs = self.app.node.get_all_transactions().map_err(custom_err)?;
         let res = txs
             .into_iter()
             .map(|authorized| {
                 let tx = authorized.transaction;
-                rpc_api::node::MempoolTx {
+                thunder::types::MempoolTx {
                     txid: tx.txid(),
                     size: tx.canonical_size(),
                     tx,

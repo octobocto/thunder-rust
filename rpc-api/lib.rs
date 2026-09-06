@@ -25,9 +25,9 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_types::{
-        Address, Authorized, Block, BlockHash, M6id, MerkleRoot, OutPoint,
-        Output, OutputContent, Pointed, PointedOutput, SpentOutput,
-        Transaction, Txid, WithdrawalBundle,
+        Address, Authorized, Block, BlockHash, BlockIndex, MempoolTx,
+        MerkleRoot, OutPoint, Output, OutputContent, Pointed, PointedOutput,
+        SpentOutput, Transaction, Txid, WithdrawalBundle,
         net::{Peer, PeerAddress},
         schema as thunder_schema,
     };
@@ -70,42 +70,11 @@ pub mod node {
         async fn stop(&self);
     }
 
-    /// One transaction of a block, with the fields its body omits
-    #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-    pub struct BlockIndexTx {
-        pub txid: Txid,
-        /// Canonical size in bytes
-        pub size: u64,
-        /// Borsh encoding, as hex
-        pub raw: String,
-    }
-
-    /// Everything about a block that its body does not carry
-    #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-    pub struct GetBlockIndexResponse {
-        /// Transactions in body order
-        pub txs: Vec<BlockIndexTx>,
-        /// Outputs that mainchain deposits created
-        pub deposits: Vec<(OutPoint, Output)>,
-        /// Outputs that a withdrawal bundle removed
-        pub bundle_spends: Vec<(OutPoint, M6id)>,
-    }
-
     #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
     pub struct GetTransactionResponse {
         pub tx: Transaction,
         /// Block hash, if in the active chain
         pub block_hash: Option<BlockHash>,
-    }
-
-    /// One transaction the mempool holds
-    #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-    pub struct MempoolTx {
-        /// Blake3 over the canonical encoding
-        pub txid: Txid,
-        /// Canonical size in bytes
-        pub size: u64,
-        pub tx: Transaction,
     }
 
     #[open_api(ref_schemas[
@@ -154,7 +123,7 @@ pub mod node {
         async fn get_block_index(
             &self,
             block_hash: thunder_types::BlockHash,
-        ) -> RpcResult<GetBlockIndexResponse>;
+        ) -> RpcResult<BlockIndex>;
 
         /// Get mainchain blocks that commit to a specified block hash
         #[open_api_method(output_schema(
