@@ -479,13 +479,11 @@ impl Wallet {
     /// these, so two transactions never share a change address.
     pub fn get_new_address(&self) -> Result<Address, Error> {
         let mut txn = self.env.write_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        let index = last_index + 1;
+        let index =
+            match self.index_to_address.last(&txn).map_err(DbError::from)? {
+                Some((last_index, _)) => BigEndian::read_u32(&last_index) + 1,
+                None => 0,
+            };
         let signing_key = self.get_signing_key(&txn, index)?;
         let address = get_address(&signing_key.verifying_key());
         let index = index.to_be_bytes();
@@ -555,13 +553,12 @@ impl Wallet {
 
     pub fn get_num_addresses(&self) -> Result<u32, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
-        let (last_index, _) = self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .unwrap_or(([0; 4], [0; 20].into()));
-        let last_index = BigEndian::read_u32(&last_index);
-        Ok(last_index)
+        let num =
+            match self.index_to_address.last(&txn).map_err(DbError::from)? {
+                Some((last_index, _)) => BigEndian::read_u32(&last_index) + 1,
+                None => 0,
+            };
+        Ok(num)
     }
 
     fn get_signing_key(
@@ -662,6 +659,41 @@ mod tests {
         let second = wallet.get_receive_address()?;
         assert_ne!(second, first);
         assert_eq!(wallet.get_receive_address()?, second);
+
+        let _unused = std::fs::remove_dir_all(&test_dir);
+        Ok(())
+    }
+
+    // A wallet that skips index 0 cannot see a deposit paid to it, and a lite
+    // wallet that derives from 0 then disagrees with the node.
+    #[test]
+    fn test_first_address_uses_index_zero() -> anyhow::Result<()> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let test_dir =
+            std::env::temp_dir().join(format!("thunder_test_index0_{nanos}"));
+        if test_dir.exists() {
+            let _unused = std::fs::remove_dir_all(&test_dir);
+        }
+
+        let wallet = Wallet::new(&test_dir)?;
+        wallet.set_seed(&[1u8; 64])?;
+        assert_eq!(wallet.get_num_addresses()?, 0);
+
+        for index in 0..3u32 {
+            let address = wallet.get_new_address()?;
+            let txn = wallet.env.read_txn()?;
+            let expected = get_address(
+                &wallet.get_signing_key(&txn, index)?.verifying_key(),
+            );
+            drop(txn);
+            assert_eq!(
+                address, expected,
+                "address {index} derives at index {index}"
+            );
+            assert_eq!(wallet.get_num_addresses()?, index + 1);
+        }
 
         let _unused = std::fs::remove_dir_all(&test_dir);
         Ok(())
