@@ -553,12 +553,8 @@ impl Wallet {
 
     pub fn get_num_addresses(&self) -> Result<u32, Error> {
         let txn = self.env.read_txn().map_err(EnvError::from)?;
-        let num =
-            match self.index_to_address.last(&txn).map_err(DbError::from)? {
-                Some((last_index, _)) => BigEndian::read_u32(&last_index) + 1,
-                None => 0,
-            };
-        Ok(num)
+        let num = self.index_to_address.len(&txn).map_err(DbError::from)?;
+        Ok(num as u32)
     }
 
     fn get_signing_key(
