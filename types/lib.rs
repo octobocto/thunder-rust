@@ -175,6 +175,8 @@ pub struct MempoolTx {
     pub txid: Txid,
     /// Canonical size in bytes
     pub size: u64,
+    /// Borsh encoding, as hex
+    pub raw: String,
     pub tx: transaction::Transaction,
 }
 

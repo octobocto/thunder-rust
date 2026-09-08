@@ -6498,6 +6498,7 @@ dependencies = [
  "bip300301_enforcer_lib",
  "bitcoin",
  "clap",
+ "const-hex",
  "dotenvy",
  "futures",
  "jsonrpsee",

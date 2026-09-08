@@ -310,6 +310,7 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
                 thunder::types::MempoolTx {
                     txid: tx.txid(),
                     size: tx.canonical_size(),
+                    raw: const_hex::encode(tx.canonical_encoding()),
                     tx,
                 }
             })
