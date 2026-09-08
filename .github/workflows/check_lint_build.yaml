@@ -291,15 +291,30 @@ jobs:
             jq -er '.packages | map(select(.name == "thunder_app") | .version) | .[0]')
           THUNDER_APP_FILENAME="thunder-${THUNDER_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
           THUNDER_CLI_FILENAME="thunder-cli-${THUNDER_APP_VERSION}-${{ matrix.name }}${{ matrix.binary-suffix }}"
+          THUNDER_ZIP_FILENAME="thunder-${THUNDER_APP_VERSION}-${{ matrix.name }}.zip"
           echo "THUNDER_APP_VERSION=$THUNDER_APP_VERSION" >> "$GITHUB_ENV"
           echo "THUNDER_APP_FILENAME=$THUNDER_APP_FILENAME" >> "$GITHUB_ENV"
           echo "THUNDER_CLI_FILENAME=$THUNDER_CLI_FILENAME" >> "$GITHUB_ENV"
+          echo "THUNDER_ZIP_FILENAME=$THUNDER_ZIP_FILENAME" >> "$GITHUB_ENV"
 
       - name: 'Set filenames for release binaries'
         run: |
           pushd "target/${{ matrix.name }}/release/"
           ln -fs "thunder_app${{ matrix.binary-suffix }}" "${THUNDER_APP_FILENAME}"
           ln -fs "thunder_app_cli${{ matrix.binary-suffix }}" "${THUNDER_CLI_FILENAME}"
+          popd
+
+      - name: 'Pack the release zip'
+        # BitWindow downloads one archive per platform and takes the daemon and
+        # its CLI from it. The names inside are bare, which is what its
+        # extractor looks for.
+        run: |
+          pushd "target/${{ matrix.name }}/release/"
+          cp "thunder_app${{ matrix.binary-suffix }}" "thunder${{ matrix.binary-suffix }}"
+          cp "thunder_app_cli${{ matrix.binary-suffix }}" "thunder-cli${{ matrix.binary-suffix }}"
+          zip -j "${THUNDER_ZIP_FILENAME}" \
+            "thunder${{ matrix.binary-suffix }}" \
+            "thunder-cli${{ matrix.binary-suffix }}"
           popd
 
       - name: 'Upload Artifacts (thunder)'
@@ -331,6 +346,7 @@ jobs:
           files: |
             target/${{ matrix.name }}/release/${{ env.THUNDER_APP_FILENAME }}
             target/${{ matrix.name }}/release/${{ env.THUNDER_CLI_FILENAME }}
+            target/${{ matrix.name }}/release/${{ env.THUNDER_ZIP_FILENAME }}
           fail_on_unmatched_files: true
           prerelease: ${{ steps.parse-git-tag-name-semver.outputs.prerelease != '' }}
 
