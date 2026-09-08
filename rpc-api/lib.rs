@@ -223,7 +223,8 @@ pub mod wallet {
     use thunder_types::{
         Address, Authorized, Block, BlockHash, MerkleRoot, OutPoint, Output,
         OutputContent, PointedOutput, Transaction, Txid,
-        schema as thunder_schema, wallet::Balance,
+        schema as thunder_schema,
+        wallet::{Balance, TransferDests},
     };
     use utoipa::ToSchema;
 
@@ -270,6 +271,15 @@ pub mod wallet {
             &self,
             dest: Address,
             value_sats: u64,
+            fee_sats: u64,
+        ) -> RpcResult<Txid>;
+
+        /// Create a tx that transfers funds to each address in `dests`,
+        /// which maps an address to a value in sats
+        #[method(name = "create_transfer_many")]
+        async fn create_transfer_many(
+            &self,
+            dests: TransferDests,
             fee_sats: u64,
         ) -> RpcResult<Txid>;
 
