@@ -102,6 +102,11 @@ async fn list_mempool_task(
     anyhow::ensure!(entry.tx.txid() == txid);
     anyhow::ensure!(entry.size == entry.tx.canonical_size());
     anyhow::ensure!(entry.size > 0);
+    // An Esplora index serves these bytes at /tx/{txid}/hex, so it never
+    // re-encodes the transaction itself.
+    anyhow::ensure!(
+        entry.raw == const_hex::encode(entry.tx.canonical_encoding())
+    );
 
     tracing::debug!("Checking that a block empties the mempool");
     let () = sidechain.bmm_single(&mut enforcer_post_setup).await?;
