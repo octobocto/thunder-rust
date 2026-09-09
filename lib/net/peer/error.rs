@@ -617,6 +617,20 @@ impl Recoverable for Error {
 }
 
 impl Error {
+    pub fn is_duplicate_connection(&self) -> bool {
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            if let Some(quinn::ConnectionError::ApplicationClosed(close)) =
+                error.downcast_ref::<quinn::ConnectionError>()
+            {
+                return close.error_code == 1_u32.into()
+                    && close.reason == b"already connected"[..];
+            }
+            source = error.source();
+        }
+        false
+    }
+
     /// True when the peer answered with another network's magic bytes. Such a
     /// peer runs a different chain, so it never becomes useful.
     pub fn is_bad_magic(&self) -> bool {
@@ -634,6 +648,54 @@ mod test {
     use crate::net::peer::message;
 
     const FOREIGN_MAGIC: message::MagicBytes = [0x85, 0x18, 0x95, 0x01];
+
+    #[test]
+    fn duplicate_close_survives_the_request_path() {
+        let close = quinn::ConnectionError::ApplicationClosed(
+            quinn::ApplicationClose {
+                error_code: 1_u32.into(),
+                reason: b"already connected"[..].into(),
+            },
+        );
+        let err = Error::Mailbox(mailbox::Error::ReceiveRequest(
+            connection::ReceiveRequest::from(close),
+        ));
+        assert!(err.is_duplicate_connection());
+    }
+
+    #[test]
+    fn duplicate_close_survives_the_response_path() {
+        let close = quinn::ConnectionError::ApplicationClosed(
+            quinn::ApplicationClose {
+                error_code: 1_u32.into(),
+                reason: b"already connected"[..].into(),
+            },
+        );
+        let err =
+            Error::ReceiveResponse(connection::ReceiveResponse::from(close));
+        assert!(err.is_duplicate_connection());
+    }
+
+    #[test]
+    fn other_connection_errors_are_not_duplicate_closes() {
+        for error in [
+            quinn::ConnectionError::TimedOut,
+            quinn::ConnectionError::ApplicationClosed(
+                quinn::ApplicationClose {
+                    error_code: 0_u32.into(),
+                    reason: b"already connected"[..].into(),
+                },
+            ),
+            quinn::ConnectionError::ApplicationClosed(
+                quinn::ApplicationClose {
+                    error_code: 1_u32.into(),
+                    reason: b"test complete"[..].into(),
+                },
+            ),
+        ] {
+            assert!(!Error::Connection(error).is_duplicate_connection());
+        }
+    }
 
     // A peer that answers a request with another network's magic must read as
     // bad magic through every wrapper the error passes.
