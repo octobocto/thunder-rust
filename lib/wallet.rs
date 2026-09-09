@@ -160,49 +160,39 @@ impl Wallet {
             stxos,
             _version: version,
         };
-        wallet.adopt_index_zero()?;
+        let mut txn = wallet.env.write_txn().map_err(EnvError::from)?;
+        wallet.recover_legacy_addresses(&mut txn)?;
+        txn.commit().map_err(RwTxnError::from)?;
         Ok(wallet)
     }
 
-    /// An earlier version generated its first address at index 1, so a wallet
-    /// from it never owned index 0 and never saw coins paid there.
-    fn adopt_index_zero(&self) -> Result<(), Error> {
-        let mut txn = self.env.write_txn().map_err(EnvError::from)?;
-        if self
-            .seed
-            .try_get(&txn, &0)
-            .map_err(DbError::from)?
-            .is_none()
-        {
+    fn recover_legacy_addresses(
+        &self,
+        txn: &mut sneed::RwTxn<'_, WalletEnv>,
+    ) -> Result<(), Error> {
+        if self.seed.try_get(txn, &0).map_err(DbError::from)?.is_none() {
             return Ok(());
         }
-        // A wallet with no address derives index 0 by itself.
-        if self
-            .index_to_address
-            .last(&txn)
-            .map_err(DbError::from)?
-            .is_none()
-        {
-            return Ok(());
+        // The Go wallet used indices 0–499 without a native address record.
+        for index in 0..500u32 {
+            let key = index.to_be_bytes();
+            if self
+                .index_to_address
+                .try_get(txn, &key)
+                .map_err(DbError::from)?
+                .is_some()
+            {
+                continue;
+            }
+            let signing_key = self.get_signing_key(txn, index)?;
+            let address = get_address(&signing_key.verifying_key());
+            self.index_to_address
+                .put(txn, &key, &address)
+                .map_err(DbError::from)?;
+            self.address_to_index
+                .put(txn, &address, &key)
+                .map_err(DbError::from)?;
         }
-        let index = 0u32.to_be_bytes();
-        if self
-            .index_to_address
-            .try_get(&txn, &index)
-            .map_err(DbError::from)?
-            .is_some()
-        {
-            return Ok(());
-        }
-        let signing_key = self.get_signing_key(&txn, 0)?;
-        let address = get_address(&signing_key.verifying_key());
-        self.index_to_address
-            .put(&mut txn, &index, &address)
-            .map_err(DbError::from)?;
-        self.address_to_index
-            .put(&mut txn, &address, &index)
-            .map_err(DbError::from)?;
-        txn.commit().map_err(RwTxnError::from)?;
         Ok(())
     }
 
@@ -218,6 +208,7 @@ impl Wallet {
             .map_err(DbError::from)?;
         self.utxos.clear(&mut rwtxn).map_err(DbError::from)?;
         self.stxos.clear(&mut rwtxn).map_err(DbError::from)?;
+        self.recover_legacy_addresses(&mut rwtxn)?;
         rwtxn.commit().map_err(RwTxnError::from)?;
         Ok(())
     }
@@ -686,6 +677,157 @@ impl Watchable<()> for Wallet {
 mod tests {
     use super::*;
 
+    const LEGACY_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    fn scan_legacy_change(wallet: &Wallet) -> anyhow::Result<()> {
+        use crate::state::State;
+
+        let dir = temp_dir::TempDir::new()?;
+        let env = unsafe {
+            sneed::Env::open(
+                heed::EnvOpenOptions::new().max_dbs(State::NUM_DBS),
+                dir.path(),
+            )?
+        };
+        let state = State::new(&env)?;
+        let output: Output = serde_json::from_str(
+            r#"{"address":"23xexovKLYvj8qWhpNBEo828eWQS","content":{"Value":5500}}"#,
+        )?;
+        let point = OutPoint::Regular {
+            txid: [0xab; 32].into(),
+            vout: 1,
+        };
+        let mut txn = env.write_txn()?;
+        state
+            .utxos
+            .put(&mut txn, &OutPointKey::from(&point), &output)?;
+        txn.commit()?;
+        let txn = env.read_txn()?;
+        let found =
+            state.get_utxos_by_addresses(&txn, &wallet.get_addresses()?)?;
+        wallet.put_utxos(&found)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_change_after_seed_import() -> anyhow::Result<()> {
+        let dir = temp_dir::TempDir::new()?;
+        let wallet = Wallet::new(dir.path())?;
+        assert!(!wallet.has_seed()?);
+        assert!(wallet.get_addresses()?.is_empty());
+        wallet.set_seed_from_mnemonic(LEGACY_MNEMONIC)?;
+
+        scan_legacy_change(&wallet)?;
+        assert_eq!(wallet.get_balance()?.total.to_sat(), 5500);
+        assert_eq!(wallet.get_num_addresses()?, 500);
+        assert!(
+            wallet
+                .get_addresses()?
+                .contains(&"38VvRdmcQREr1UAcZma98WLFVpAp".parse()?)
+        );
+
+        let (point, output) = wallet.get_utxos()?.into_iter().next().unwrap();
+        let signed = wallet.authorize(Transaction {
+            inputs: vec![(
+                point,
+                hash(&PointedOutput {
+                    outpoint: point,
+                    output: output.clone(),
+                }),
+            )],
+            outputs: vec![output.clone()],
+            ..Transaction::default()
+        })?;
+        crate::types::authorization::verify_authorized_transaction(&signed)?;
+        assert_eq!(
+            get_address(&signed.authorizations[0].verifying_key),
+            output.address
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_recovery_keeps_seed_and_addresses() -> anyhow::Result<()> {
+        let dir = temp_dir::TempDir::new()?;
+        let addresses = {
+            let wallet = Wallet::new(dir.path())?;
+            wallet.set_seed_from_mnemonic(LEGACY_MNEMONIC)?;
+            scan_legacy_change(&wallet)?;
+            let addresses = wallet.get_addresses()?;
+            assert_eq!(addresses.len(), 500);
+            wallet.set_seed_from_mnemonic(LEGACY_MNEMONIC)?;
+            assert_eq!(wallet.get_addresses()?, addresses);
+            assert!(matches!(
+                wallet.set_seed(&[2; 64]),
+                Err(Error::SeedAlreadyExists)
+            ));
+            assert_eq!(wallet.get_addresses()?, addresses);
+            assert_eq!(wallet.get_balance()?.total.to_sat(), 5500);
+            addresses
+        };
+        for _ in 0..2 {
+            let wallet = Wallet::new(dir.path())?;
+            assert_eq!(wallet.get_addresses()?, addresses);
+            assert_eq!(wallet.get_balance()?.total.to_sat(), 5500);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_legacy_recovery_keeps_existing_wallet() -> anyhow::Result<()> {
+        let dir = temp_dir::TempDir::new()?;
+        let (last_address, next_address) = {
+            let wallet = Wallet::new(dir.path())?;
+            wallet.set_seed_from_mnemonic(LEGACY_MNEMONIC)?;
+            let mut txn = wallet.env.write_txn()?;
+            wallet.index_to_address.clear(&mut txn)?;
+            wallet.address_to_index.clear(&mut txn)?;
+            let mut last_address = Address([0; 20]);
+            for index in [1u32, 600] {
+                let address = get_address(
+                    &wallet.get_signing_key(&txn, index)?.verifying_key(),
+                );
+                let key = index.to_be_bytes();
+                wallet.index_to_address.put(&mut txn, &key, &address)?;
+                wallet.address_to_index.put(&mut txn, &address, &key)?;
+                last_address = address;
+            }
+            let next_address = get_address(
+                &wallet.get_signing_key(&txn, 601)?.verifying_key(),
+            );
+            txn.commit()?;
+            wallet.put_utxos(&HashMap::from([(
+                OutPoint::Regular {
+                    txid: [1; 32].into(),
+                    vout: 0,
+                },
+                Output {
+                    address: last_address,
+                    content: OutputContent::Value(bitcoin::Amount::from_sat(
+                        1000,
+                    )),
+                },
+            )]))?;
+            assert_eq!(wallet.get_num_addresses()?, 2);
+            (last_address, next_address)
+        };
+
+        let wallet = Wallet::new(dir.path())?;
+        assert_eq!(wallet.get_num_addresses()?, 501);
+        assert!(wallet.get_addresses()?.contains(&last_address));
+        assert!(
+            wallet
+                .get_addresses()?
+                .contains(&"38VvRdmcQREr1UAcZma98WLFVpAp".parse()?)
+        );
+        assert_eq!(wallet.get_balance()?.total.to_sat(), 1000);
+        scan_legacy_change(&wallet)?;
+        assert_eq!(wallet.get_balance()?.total.to_sat(), 6500);
+        assert_eq!(wallet.get_new_address()?, next_address);
+        assert_eq!(wallet.get_num_addresses()?, 502);
+        Ok(())
+    }
+
     #[test]
     fn test_get_receive_address() -> anyhow::Result<()> {
         let nanos = std::time::SystemTime::now()
@@ -705,12 +847,12 @@ mod tests {
         for _ in 0..10 {
             assert_eq!(wallet.get_receive_address()?, first);
         }
-        assert_eq!(wallet.get_addresses()?.len(), 1);
+        assert_eq!(wallet.get_addresses()?.len(), 500);
 
         // A fresh address is still fresh, so a change output never reuses one.
         let fresh = wallet.get_new_address()?;
         assert_ne!(fresh, first);
-        assert_eq!(wallet.get_addresses()?.len(), 2);
+        assert_eq!(wallet.get_addresses()?.len(), 501);
 
         // The receive address moves on once it receives.
         let outpoint = OutPoint::Regular {
@@ -730,10 +872,8 @@ mod tests {
         Ok(())
     }
 
-    // A wallet that skips index 0 cannot see a deposit paid to it, and a lite
-    // wallet that derives from 0 then disagrees with the node.
     #[test]
-    fn test_first_address_uses_index_zero() -> anyhow::Result<()> {
+    fn test_new_address_follows_legacy_range() -> anyhow::Result<()> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -745,9 +885,9 @@ mod tests {
 
         let wallet = Wallet::new(&test_dir)?;
         wallet.set_seed(&[1u8; 64])?;
-        assert_eq!(wallet.get_num_addresses()?, 0);
+        assert_eq!(wallet.get_num_addresses()?, 500);
 
-        for index in 0..3u32 {
+        for index in 500..503u32 {
             let address = wallet.get_new_address()?;
             let txn = wallet.env.read_txn()?;
             let expected = get_address(
@@ -760,51 +900,6 @@ mod tests {
             );
             assert_eq!(wallet.get_num_addresses()?, index + 1);
         }
-
-        let _unused = std::fs::remove_dir_all(&test_dir);
-        Ok(())
-    }
-
-    // An update must show coins paid to index 0, without a seed restore.
-    #[test]
-    fn test_legacy_wallet_adopts_index_zero() -> anyhow::Result<()> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos();
-        let test_dir =
-            std::env::temp_dir().join(format!("thunder_test_adopt0_{nanos}"));
-        if test_dir.exists() {
-            let _unused = std::fs::remove_dir_all(&test_dir);
-        }
-
-        let index_zero = {
-            let wallet = Wallet::new(&test_dir)?;
-            wallet.set_seed(&[1u8; 64])?;
-
-            // The earlier version recorded index 1 first, and never index 0.
-            let mut txn = wallet.env.write_txn()?;
-            let one = 1u32.to_be_bytes();
-            let address =
-                get_address(&wallet.get_signing_key(&txn, 1)?.verifying_key());
-            wallet.index_to_address.put(&mut txn, &one, &address)?;
-            wallet.address_to_index.put(&mut txn, &address, &one)?;
-            let zero =
-                get_address(&wallet.get_signing_key(&txn, 0)?.verifying_key());
-            txn.commit()?;
-            assert!(!wallet.get_addresses()?.contains(&zero));
-            zero
-        };
-
-        let wallet = Wallet::new(&test_dir)?;
-        assert!(
-            wallet.get_addresses()?.contains(&index_zero),
-            "reopening adopts index 0"
-        );
-        assert_eq!(wallet.get_num_addresses()?, 2);
-
-        // The migration runs twice without a second address.
-        wallet.adopt_index_zero()?;
-        assert_eq!(wallet.get_num_addresses()?, 2);
 
         let _unused = std::fs::remove_dir_all(&test_dir);
         Ok(())
@@ -825,18 +920,15 @@ mod tests {
 
         let wallet = Wallet::new(&test_dir)?;
 
-        // Seed must be set before we can generate addresses
         assert!(!wallet.has_seed()?);
+        assert!(wallet.try_get_last_address()?.is_none());
         let seed = [1u8; 64];
         wallet.set_seed(&seed)?;
         assert!(wallet.has_seed()?);
 
-        // Get last address when none have been generated
         let last = wallet.try_get_last_address()?;
-        assert!(last.is_none());
-
-        // The first call should generate the first address.
         let addr1 = wallet.get_or_generate_last_address()?;
+        assert_eq!(last, Some(addr1));
 
         let last = wallet.try_get_last_address()?;
         assert_eq!(last, Some(addr1));
