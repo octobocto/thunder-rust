@@ -1227,8 +1227,13 @@ impl NetTask {
                                     resolved_peer_addr
                                 });
                             } else if let (_, Some(resolved_peer_addr)) =
-                                resolved_peer_addr.pop_first_ip_addr()
+                                resolved_peer_addr.clone().pop_first_ip_addr()
                             {
+                                reconnect_peer_spawner.spawn(async move {
+                                    tokio::time::sleep(RECONNECT_DELAY).await;
+                                    resolved_peer_addr
+                                });
+                            } else if err.is_connect_timeout() {
                                 reconnect_peer_spawner.spawn(async move {
                                     tokio::time::sleep(RECONNECT_DELAY).await;
                                     resolved_peer_addr
@@ -1435,26 +1440,74 @@ mod test {
         },
     };
 
+    fn temp_node(
+        runtime: &tokio::runtime::Runtime,
+    ) -> anyhow::Result<(temp_dir::TempDir, Node)> {
+        let temp_dir = temp_dir::TempDir::new()?;
+        let channel =
+            tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                .connect_lazy();
+        let node = Node::new(
+            Config {
+                datadir: temp_dir.path(),
+                bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
+                magic_bytes_override: None,
+                network: Network::Regtest,
+                peers: &[],
+            },
+            ValidatorClient::new(channel),
+            None,
+            runtime,
+        )?;
+        Ok((temp_dir, node))
+    }
+
+    #[test]
+    fn retry_connection_timeout_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime)?;
+            let silent_peer =
+                tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let addr = silent_peer.local_addr()?;
+            node.connect_peer(addr.into())?;
+            assert_eq!(node.get_active_peers().len(), 1);
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            tokio::time::timeout(Duration::from_secs(35), async {
+                while !node.get_active_peers().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .context("the QUIC connection did not time out")?;
+            drop(silent_peer);
+            let (remote, _) = make_server_endpoint(addr)?;
+            let retry = tokio::time::timeout(Duration::from_secs(15), async {
+                remote
+                    .accept()
+                    .await
+                    .context("the endpoint closed before the retry")?
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .context("the node did not retry the connection timeout")??;
+            assert!(retry.close_reason().is_none());
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
+    }
+
     #[test]
     fn retry_duplicate_close_before_first_message() -> anyhow::Result<()> {
         let runtime = tokio::runtime::Runtime::new()?;
-        let temp_dir = temp_dir::TempDir::new()?;
         runtime.block_on(async {
-            let channel =
-                tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
-                    .connect_lazy();
-            let node = Node::new(
-                Config {
-                    datadir: temp_dir.path(),
-                    bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
-                    magic_bytes_override: None,
-                    network: Network::Regtest,
-                    peers: &[],
-                },
-                ValidatorClient::new(channel),
-                None,
-                &runtime,
-            )?;
+            let (_temp_dir, node) = temp_node(&runtime)?;
             let (remote, _) =
                 make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
             let addr = remote.local_addr()?;
