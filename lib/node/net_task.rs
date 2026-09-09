@@ -1218,7 +1218,9 @@ impl NetTask {
                             else {
                                 continue;
                             };
-                            if received_msg_successfully && err.may_reconnect()
+                            if (received_msg_successfully
+                                || err.is_duplicate_connection())
+                                && err.may_reconnect()
                             {
                                 reconnect_peer_spawner.spawn(async move {
                                     tokio::time::sleep(RECONNECT_DELAY).await;
@@ -1416,10 +1418,98 @@ impl Drop for NetTaskHandle {
 
 #[cfg(test)]
 mod test {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use anyhow::Context;
+
     use crate::{
-        node::net_task::{Error, is_fatal_reorg_error},
+        net::make_server_endpoint,
+        node::{
+            Config, Node,
+            net_task::{Error, is_fatal_reorg_error},
+        },
         state,
+        types::{
+            Network, net::PeerConnectionStatus,
+            proto::mainchain::ValidatorClient,
+        },
     };
+
+    #[test]
+    fn retry_duplicate_close_before_first_message() -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        let temp_dir = temp_dir::TempDir::new()?;
+        runtime.block_on(async {
+            let channel =
+                tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
+                    .connect_lazy();
+            let node = Node::new(
+                Config {
+                    datadir: temp_dir.path(),
+                    bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
+                    magic_bytes_override: None,
+                    network: Network::Regtest,
+                    peers: &[],
+                },
+                ValidatorClient::new(channel),
+                None,
+                &runtime,
+            )?;
+            let (remote, _) =
+                make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+            let addr = remote.local_addr()?;
+            node.connect_peer(addr.into())?;
+            let mut connection =
+                tokio::time::timeout(Duration::from_secs(5), remote.accept())
+                    .await?
+                    .context("the first connection did not arrive")?
+                    .await?;
+            assert_eq!(
+                node.net.try_with_active_peer_connection(addr, |peer| peer
+                    .received_msg_successfully(),),
+                Some(false)
+            );
+
+            let remote_addr = connection.remote_address();
+            for _ in 0..2 {
+                let closed_at = tokio::time::Instant::now();
+                connection.close(1_u32.into(), b"already connected");
+                connection =
+                    tokio::time::timeout(Duration::from_secs(15), async {
+                        remote
+                            .accept()
+                            .await
+                            .context("the endpoint closed before the retry")?
+                            .await
+                            .map_err(anyhow::Error::from)
+                    })
+                    .await
+                    .context("the node did not retry the duplicate close")??;
+
+                assert!(closed_at.elapsed() >= Duration::from_secs(10));
+                assert_eq!(connection.remote_address(), remote_addr);
+                assert_eq!(
+                    node.net.try_with_active_peer_connection(addr, |peer| peer
+                        .received_msg_successfully(),),
+                    Some(false)
+                );
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if node.get_active_peers().iter().any(|peer| {
+                        peer.address == addr
+                            && peer.status == PeerConnectionStatus::Connected
+                    }) {
+                        return;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
+    }
 
     // a peer's invalid block (value out > value in) must not be fatal
     #[test]
