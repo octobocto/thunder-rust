@@ -1265,6 +1265,10 @@ pub mod mainchain {
                 sidechain_id: Some(THIS_SIDECHAIN as u32),
                 transaction: Some(bitcoin::consensus::serialize(transaction)),
             };
+            #[expect(
+                deprecated,
+                reason = "the enforcer keeps this RPC as an alias for BlockProducerService.ProposeWithdrawalBundle"
+            )]
             let generated::BroadcastWithdrawalBundleResponse {} = self
                 .0
                 .broadcast_withdrawal_bundle(request)
