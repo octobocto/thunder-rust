@@ -4,9 +4,12 @@ use clap::{Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 
-use thunder::types::{Address, Txid, net::PeerAddress, wallet::TransferDests};
+use thunder::types::{
+    Address, M6id, Txid, net::PeerAddress, wallet::TransferDests,
+};
 use thunder_app_rpc_api::{
-    node::{PrivateRpcClient as _, RpcClient as _},
+    node::{PrivateRpcClient as _, RpcClient as _, get_block::RpcClient as _},
+    typewit::const_marker::Bool,
     wallet::RpcClient as _,
 };
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -87,7 +90,10 @@ pub enum Command {
     /// Get the block with specified block hash, if it exists
     GetBlock {
         block_hash: thunder::types::BlockHash,
+        verbose: Option<bool>,
     },
+    /// Get the current block count
+    GetBlockcount,
     /// Get the block hash at the specified height in the active chain, if it
     /// exists
     GetBlockHash { height: u32 },
@@ -119,8 +125,8 @@ pub enum Command {
     GetWalletAddresses,
     /// Get wallet UTXOs
     GetWalletUtxos,
-    /// Get the current block count
-    GetBlockcount,
+    /// Get withdrawal bundle by M6id
+    GetWithdrawalBundle { m6id: M6id },
     /// Invalidate a block, potentially re-orging to a valid ancestor of the
     /// current tip.
     InvalidateBlock {
@@ -264,10 +270,6 @@ where
             rpc_client.forget_peer(addr).await?;
             String::default()
         }
-        Command::GetBlock { block_hash } => {
-            let block = rpc_client.get_block(block_hash).await?;
-            serde_json::to_string_pretty(&block)?
-        }
         Command::GetBestMainchainBlockHash => {
             let block_hash = rpc_client.get_best_mainchain_block_hash().await?;
             serde_json::to_string_pretty(&block_hash)?
@@ -275,6 +277,25 @@ where
         Command::GetBestSidechainBlockHash => {
             let block_hash = rpc_client.get_best_sidechain_block_hash().await?;
             serde_json::to_string_pretty(&block_hash)?
+        }
+        Command::GetBlock {
+            block_hash,
+            verbose,
+        } => match verbose {
+            Some(true) => {
+                let block =
+                    rpc_client.get_block(block_hash, Bool::<true>).await?;
+                serde_json::to_string_pretty(&block)?
+            }
+            Some(false) | None => {
+                let block =
+                    rpc_client.get_block(block_hash, Bool::<false>).await?;
+                serde_json::to_string_pretty(&block)?
+            }
+        },
+        Command::GetBlockcount => {
+            let blockcount = rpc_client.getblockcount().await?;
+            format!("{blockcount}")
         }
         Command::GetBlockIndex { block_hash } => {
             let block_index = rpc_client.get_block_index(block_hash).await?;
@@ -316,9 +337,10 @@ where
             let utxos = rpc_client.get_wallet_utxos().await?;
             serde_json::to_string_pretty(&utxos)?
         }
-        Command::GetBlockcount => {
-            let blockcount = rpc_client.getblockcount().await?;
-            format!("{blockcount}")
+        Command::GetWithdrawalBundle { m6id } => {
+            let withdrawal_bundle =
+                rpc_client.get_withdrawal_bundle(m6id).await?;
+            serde_json::to_string_pretty(&withdrawal_bundle)?
         }
         Command::InvalidateBlock { block_hash } => {
             let () = rpc_client.invalidate_block(block_hash).await?;
