@@ -1434,7 +1434,11 @@ impl Drop for NetTaskHandle {
 
 #[cfg(test)]
 mod test {
-    use std::{collections::HashMap, net::Ipv4Addr, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        net::Ipv4Addr,
+        time::Duration,
+    };
 
     use anyhow::Context;
     use futures::channel::mpsc;
@@ -1463,11 +1467,12 @@ mod test {
                 .connect_lazy();
         let node = Node::new(
             Config {
-                datadir: temp_dir.path(),
+                datadir: temp_dir.path().to_owned(),
                 bind_addr: (Ipv4Addr::LOCALHOST, 0).into(),
                 magic_bytes_override: None,
                 network: Network::Regtest,
-                peers: &[],
+                add_peers: HashSet::new(),
+                server_names: HashSet::new(),
             },
             ValidatorClient::new(channel),
             None,
@@ -1625,7 +1630,7 @@ mod test {
             .await
             .context("the QUIC connection did not time out")?;
             drop(silent_peer);
-            let (remote, _) = make_server_endpoint(addr)?;
+            let (remote, _) = make_server_endpoint(addr, HashSet::new())?;
             let retry = tokio::time::timeout(Duration::from_secs(15), async {
                 remote
                     .accept()
@@ -1647,8 +1652,10 @@ mod test {
         let runtime = tokio::runtime::Runtime::new()?;
         runtime.block_on(async {
             let (_temp_dir, node) = temp_node(&runtime)?;
-            let (remote, _) =
-                make_server_endpoint((Ipv4Addr::LOCALHOST, 0).into())?;
+            let (remote, _) = make_server_endpoint(
+                (Ipv4Addr::LOCALHOST, 0).into(),
+                HashSet::new(),
+            )?;
             let addr = remote.local_addr()?;
             node.connect_peer(addr.into())?;
             let mut connection =
