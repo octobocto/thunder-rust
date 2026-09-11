@@ -227,23 +227,29 @@ where
             }
         }
         block_infos.reverse();
-        // Writing all headers during IBD can starve archive readers.
+        const WRITE_CHUNK_SIZE: usize = 20_000;
         tracing::trace!(%block_hash, "storing ancestor headers/info");
-        task::block_in_place(|| {
-            let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-            for (header_info, block_info) in block_infos {
-                let () =
-                    archive.put_main_header_info(&mut rwtxn, &header_info)?;
-                let () = archive.put_main_block_info(
-                    &mut rwtxn,
-                    header_info.block_hash,
-                    &block_info,
-                )?;
-            }
-            rwtxn.commit().map_err(RwTxnError::from)?;
-            tracing::trace!(%block_hash, "stored ancestor headers/info");
-            Ok(true)
-        })
+        for chunk in block_infos.chunks(WRITE_CHUNK_SIZE) {
+            // Writing all headers during IBD can starve archive readers.
+            task::block_in_place(|| {
+                let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+                for (header_info, block_info) in chunk {
+                    let () = archive
+                        .put_main_header_info(&mut rwtxn, header_info)?;
+                    let () = archive.put_main_block_info(
+                        &mut rwtxn,
+                        header_info.block_hash,
+                        block_info,
+                    )?;
+                }
+                rwtxn.commit().map_err(RwTxnError::from)?;
+                Ok::<_, error::RequestAncestorInfos>(())
+            })?;
+            // A shutdown can stop the task here, between two commits.
+            task::yield_now().await;
+        }
+        tracing::trace!(%block_hash, "stored ancestor headers/info");
+        Ok(true)
     }
 
     /// Sync mainchain state to the specified mainchain tip.
@@ -737,7 +743,8 @@ impl Drop for MainchainTaskHandle {
 mod test {
     use std::{
         convert::Infallible,
-        future::Ready,
+        future::{Future, Ready},
+        ops::ControlFlow,
         sync::Arc,
         task::{Context, Poll},
     };
@@ -768,10 +775,56 @@ mod test {
         Ok((temp_dir, env))
     }
 
+    /// Poll `walk` to the end. Stop it when `on_pending` breaks.
+    async fn poll_walk<F: Future>(
+        walk: F,
+        mut on_pending: impl FnMut() -> anyhow::Result<ControlFlow<()>>,
+    ) -> anyhow::Result<Option<F::Output>> {
+        let mut walk = std::pin::pin!(walk);
+        loop {
+            let poll =
+                std::future::poll_fn(|cx| Poll::Ready(walk.as_mut().poll(cx)))
+                    .await;
+            if let Poll::Ready(output) = poll {
+                return Ok(Some(output));
+            }
+            if on_pending()?.is_break() {
+                return Ok(None);
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Count the stored headers of the [`main_header_info`] chain, and fail
+    /// if a stored header has a missing ancestor
+    fn stored_headers(
+        env: &sneed::Env<heed::WithoutTls>,
+        archive: &Archive,
+        tip_height: u32,
+    ) -> anyhow::Result<u32> {
+        let rotxn = env.read_txn()?;
+        let stored = (0..=tip_height)
+            .map(|height| {
+                let block_hash = main_header_info(height).block_hash;
+                archive
+                    .try_get_main_header_info(&rotxn, &block_hash)
+                    .map(|info| info.is_some())
+            })
+            .collect::<Result<Vec<bool>, _>>()?;
+        let count = stored.iter().take_while(|stored| **stored).count();
+        anyhow::ensure!(
+            !stored[count..].contains(&true),
+            "header {count} is missing, but a descendant is stored"
+        );
+        Ok(count as u32)
+    }
+
     /// Serves `GetBlockInfo` for the chain of [`main_header_info`], and
-    /// records the `max_ancestors` and the sync progress of each request
+    /// records the height, the `max_ancestors` and the sync progress of each
+    /// request
     #[derive(Clone, Default)]
     struct MockValidator {
+        heights: Arc<Mutex<Vec<u32>>>,
         max_ancestors: Arc<Mutex<Vec<u32>>>,
         progress: Arc<Mutex<Vec<MainchainSyncProgress>>>,
         sync_progress: SyncProgress,
@@ -812,6 +865,7 @@ mod test {
                     .try_into()
                     .expect("4 height bytes"),
             );
+            self.heights.lock().push(height);
             let infos = (height.saturating_sub(max_ancestors)..=height)
                 .rev()
                 .map(|height| {
@@ -889,6 +943,84 @@ mod test {
         )?;
         assert!(available);
         assert_eq!(*mock.max_ancestors.lock(), [19_999]);
+        Ok(())
+    }
+
+    #[test]
+    fn header_writes_keep_the_ancestor_rule() -> anyhow::Result<()> {
+        const TIP_HEIGHT: u32 = 49_999;
+        let (_temp_dir, env) = temp_env()?;
+        let archive = Archive::new(&env)?;
+        let mock = MockValidator::default();
+        let mut client = ValidatorClient::new(mock.clone());
+        let tip = main_header_info(TIP_HEIGHT).block_hash;
+        let mut stored = Vec::new();
+        let runtime = tokio::runtime::Runtime::new()?;
+        let available = runtime.block_on(poll_walk(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                &mock.sync_progress,
+                tip,
+            ),
+            || {
+                let count = stored_headers(&env, &archive, TIP_HEIGHT)?;
+                if stored.last() != Some(&count) {
+                    stored.push(count);
+                }
+                Ok(ControlFlow::Continue(()))
+            },
+        ))?;
+        assert_eq!(available.transpose()?, Some(true));
+        assert_eq!(stored, [20_000, 40_000, 50_000]);
+        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 50_000);
+        Ok(())
+    }
+
+    #[test]
+    fn ancestor_walk_resumes_after_a_stop() -> anyhow::Result<()> {
+        const TIP_HEIGHT: u32 = 49_999;
+        let (_temp_dir, env) = temp_env()?;
+        let archive = Archive::new(&env)?;
+        let mock = MockValidator::default();
+        let mut client = ValidatorClient::new(mock.clone());
+        let tip = main_header_info(TIP_HEIGHT).block_hash;
+        let runtime = tokio::runtime::Runtime::new()?;
+        let stopped = runtime.block_on(poll_walk(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                &mock.sync_progress,
+                tip,
+            ),
+            || {
+                let count = stored_headers(&env, &archive, TIP_HEIGHT)?;
+                Ok(if count > 0 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            },
+        ))?;
+        assert_eq!(stopped.transpose()?, None);
+        assert_eq!(*mock.heights.lock(), [49_999, 29_999, 9_999]);
+        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 20_000);
+
+        mock.heights.lock().clear();
+        let available = runtime.block_on(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                &mock.sync_progress,
+                tip,
+            ),
+        )?;
+        assert!(available);
+        assert_eq!(*mock.heights.lock(), [49_999, 29_999]);
+        assert_eq!(stored_headers(&env, &archive, TIP_HEIGHT)?, 50_000);
         Ok(())
     }
 
