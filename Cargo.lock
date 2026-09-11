@@ -6644,6 +6644,7 @@ dependencies = [
 name = "thunder_app_rpc_api"
 version = "0.17.14"
 dependencies = [
+ "anyhow",
  "bitcoin",
  "jsonrpsee",
  "l2l-openapi",
