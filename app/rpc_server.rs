@@ -157,6 +157,13 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         Ok(Some(block))
     }
 
+    async fn get_block_hash(
+        &self,
+        height: u32,
+    ) -> RpcResult<Option<thunder::types::BlockHash>> {
+        self.app.node.try_get_block_hash(height).map_err(custom_err)
+    }
+
     async fn get_best_sidechain_block_hash(
         &self,
     ) -> RpcResult<Option<thunder::types::BlockHash>> {
@@ -178,13 +185,6 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .get_best_main_verification(sidechain_hash)
             .map_err(custom_err)?;
         Ok(Some(block_hash))
-    }
-
-    async fn get_block_hash(
-        &self,
-        height: u32,
-    ) -> RpcResult<Option<thunder::types::BlockHash>> {
-        self.app.node.try_get_block_hash(height).map_err(custom_err)
     }
 
     async fn get_block_index(

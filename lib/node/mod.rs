@@ -418,7 +418,7 @@ where
         }
     }
 
-    /// Get the block hash at the specified height in the current chain,
+    /// Get the block hash at the specified height in the active chain,
     /// if it exists
     pub fn try_get_block_hash(
         &self,

@@ -104,7 +104,7 @@ pub mod node {
             block_hash: thunder_types::BlockHash,
         ) -> RpcResult<Option<thunder_types::Block>>;
 
-        /// Get the block hash at the specified height in the current chain,
+        /// Get the block hash at the specified height in the active chain,
         /// if it exists
         #[open_api_method(output_schema(
             PartialSchema = "schema::Optional<thunder_types::BlockHash>"
