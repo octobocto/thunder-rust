@@ -402,7 +402,7 @@ mod content {
         }
 
         pub(crate) fn schema_ref() -> utoipa::openapi::Ref {
-            utoipa::openapi::Ref::new("OutputContent")
+            utoipa::openapi::Ref::from_schema_name("OutputContent")
         }
     }
 
