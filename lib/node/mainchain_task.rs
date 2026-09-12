@@ -85,6 +85,19 @@ impl SyncProgress {
         };
     }
 
+    fn start_writing(&self, tip_height: u32, total: u32) {
+        *self.0.lock() = MainchainSyncProgress {
+            phase: MainchainSyncPhase::Writing,
+            done: 0,
+            total,
+            tip_height,
+        };
+    }
+
+    fn wrote_headers(&self, headers: u32) {
+        self.0.lock().done += headers;
+    }
+
     fn start_state(&self, tip_height: u32, total: u32) {
         *self.0.lock() = MainchainSyncProgress {
             phase: MainchainSyncPhase::State,
@@ -226,9 +239,11 @@ where
                 }
             }
         }
+        let tip_height = block_infos[0].0.height;
         block_infos.reverse();
         // Writing all headers during IBD can starve archive readers.
         tracing::trace!(%block_hash, "storing ancestor headers/info");
+        sync_progress.start_writing(tip_height, block_infos.len() as u32);
         task::block_in_place(|| {
             let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
             for (header_info, block_info) in block_infos {
@@ -239,6 +254,7 @@ where
                     header_info.block_hash,
                     &block_info,
                 )?;
+                sync_progress.wrote_headers(1);
             }
             rwtxn.commit().map_err(RwTxnError::from)?;
             tracing::trace!(%block_hash, "stored ancestor headers/info");
@@ -738,8 +754,12 @@ mod test {
     use std::{
         convert::Infallible,
         future::Ready,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         task::{Context, Poll},
+        time::Duration,
     };
 
     use bitcoin::hashes::Hash as _;
@@ -893,7 +913,7 @@ mod test {
     }
 
     #[test]
-    fn sync_progress_walks_headers_then_state() -> anyhow::Result<()> {
+    fn sync_progress_walks_headers_writing_then_state() -> anyhow::Result<()> {
         const TIP_HEIGHT: u32 = 20_099;
         let (_temp_dir, env) = temp_env()?;
         let archive = Archive::new(&env)?;
@@ -901,6 +921,19 @@ mod test {
         let sync_progress = &mock.sync_progress;
         let mut client = ValidatorClient::new(mock.clone());
         let tip = main_header_info(TIP_HEIGHT).block_hash;
+        let stop_sampler = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let sync_progress = sync_progress.clone();
+            let stop_sampler = stop_sampler.clone();
+            std::thread::spawn(move || {
+                let mut samples = Vec::new();
+                while !stop_sampler.load(Ordering::Relaxed) {
+                    samples.push(sync_progress.get());
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                samples
+            })
+        };
         let runtime = tokio::runtime::Runtime::new()?;
         let available = runtime.block_on(
             MainchainTask::<MockValidator>::request_ancestor_infos(
@@ -911,6 +944,8 @@ mod test {
                 tip,
             ),
         )?;
+        stop_sampler.store(true, Ordering::Relaxed);
+        let samples = sampler.join().expect("the sampler thread ends");
         assert!(available);
         let headers = |done| MainchainSyncProgress {
             phase: MainchainSyncPhase::Headers,
@@ -922,7 +957,28 @@ mod test {
             *mock.progress.lock(),
             [MainchainSyncProgress::default(), headers(20_000)]
         );
-        assert_eq!(sync_progress.get(), headers(TIP_HEIGHT));
+        let written: Vec<u32> = samples
+            .iter()
+            .filter(|progress| {
+                progress.phase == MainchainSyncPhase::Writing
+                    && progress.total == TIP_HEIGHT + 1
+                    && progress.tip_height == TIP_HEIGHT
+            })
+            .map(|progress| progress.done)
+            .collect();
+        assert!(
+            written.iter().any(|done| *done > 0 && *done <= TIP_HEIGHT),
+            "the write progress did not move: {written:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(sync_progress.get())?,
+            serde_json::json!({
+                "phase": "writing",
+                "done": TIP_HEIGHT + 1,
+                "total": TIP_HEIGHT + 1,
+                "tip_height": TIP_HEIGHT,
+            })
+        );
 
         let (mut event_tx, _event_rx) = mpsc::unbounded();
         MainchainTask::<MockValidator>::sync_side_tips_to_tip(
