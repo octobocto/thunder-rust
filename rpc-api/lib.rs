@@ -1,6 +1,8 @@
 //! RPC API
 
 mod schema;
+#[cfg(test)]
+mod test;
 
 pub mod open_api {
     use jsonrpsee::{core::RpcResult, proc_macros::rpc};
