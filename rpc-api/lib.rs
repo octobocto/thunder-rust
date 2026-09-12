@@ -25,11 +25,12 @@ pub mod node {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_types::{
-        Address, Authorized, Block, BlockHash, BlockIndex,
-        MainchainSyncProgress, MempoolTx, MerkleRoot, OutPoint, Output,
-        OutputContent, Pointed, PointedOutput, SpentOutput, Transaction, Txid,
-        WithdrawalBundle,
-        net::{Peer, PeerAddress},
+        Address, Authorization, Authorized, Block, BlockHash, BlockIndex,
+        BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, Body, Header,
+        InPoint, M6id, MainchainSyncPhase, MainchainSyncProgress, MempoolTx,
+        MerkleRoot, OutPoint, Output, OutputContent, Pointed, PointedOutput,
+        SpentOutput, Transaction, Txid, WithdrawalBundle,
+        net::{Peer, PeerAddress, PeerConnectionStatus},
         schema as thunder_schema,
     };
     use utoipa::ToSchema;
@@ -79,9 +80,14 @@ pub mod node {
     }
 
     #[open_api(ref_schemas[
-        Address, MerkleRoot, OutPoint, Output, OutputContent, Txid,
+        Address, Authorization, Block, BlockHash, BlockIndexDeposit,
+        BlockIndexSpend, BlockIndexTx, Body, Header, InPoint, M6id,
+        MainchainSyncPhase, MerkleRoot, OutPoint, Output, OutputContent,
+        PeerConnectionStatus, SpentOutput, Transaction, Txid,
         schema::BitcoinTxid, thunder_schema::BitcoinAddr,
-        thunder_schema::BitcoinOutPoint,
+        thunder_schema::BitcoinBlockHash, thunder_schema::BitcoinOutPoint,
+        thunder_schema::BitcoinTransaction, thunder_schema::SocketAddr,
+        thunder_schema::UtreexoNodeHash, thunder_schema::UtreexoProof,
     ])]
     #[rpc(client, server, server_bounds(Self: open_api::RpcServer))]
     pub trait Rpc {
