@@ -7,8 +7,7 @@ use jsonrpsee::{
     types::ErrorObject,
 };
 use thunder::types::{
-    Address, Block, M6id, Pointed, PointedOutput, SpentOutput, Txid,
-    WithdrawalBundle,
+    Address, Block, M6id, PointedOutput, SpentOutput, Txid, WithdrawalBundle,
     net::{Peer, PeerAddress},
     wallet::{Balance, TransferDests},
 };
@@ -250,12 +249,15 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
         let txs = body
             .transactions
             .iter()
-            .map(|tx| thunder::types::BlockIndexTx {
-                txid: tx.txid(),
-                size: tx.canonical_size(),
-                raw: const_hex::encode(tx.canonical_encoding()),
+            .map(|tx| {
+                Ok(thunder::types::BlockIndexTx {
+                    txid: tx.txid(),
+                    size: tx.canonical_size()?,
+                    raw: const_hex::encode(tx.canonical_bytes()?),
+                })
             })
-            .collect();
+            .collect::<Result<_, std::io::Error>>()
+            .map_err(custom_err)?;
         let events = self
             .app
             .node
@@ -295,14 +297,14 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
     async fn get_stxos(
         &self,
         addresses: HashSet<Address>,
-    ) -> RpcResult<Vec<Pointed<SpentOutput>>> {
+    ) -> RpcResult<Vec<PointedOutput<SpentOutput>>> {
         let res = self
             .app
             .node
             .get_stxos_by_addresses(&addresses)
             .map_err(custom_err)?
             .into_iter()
-            .map(|(outpoint, output)| Pointed { outpoint, output })
+            .map(|(outpoint, output)| PointedOutput { outpoint, output })
             .collect();
         Ok(res)
     }
@@ -384,14 +386,15 @@ impl<const ENABLE_PRIVATE_API: bool> rpc_api::node::RpcServer
             .into_iter()
             .map(|authorized| {
                 let tx = authorized.transaction;
-                thunder::types::MempoolTx {
+                Ok(thunder::types::MempoolTx {
                     txid: tx.txid(),
-                    size: tx.canonical_size(),
-                    raw: const_hex::encode(tx.canonical_encoding()),
+                    size: tx.canonical_size()?,
+                    raw: const_hex::encode(tx.canonical_bytes()?),
                     tx,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_, std::io::Error>>()
+            .map_err(custom_err)?;
         Ok(res)
     }
 
@@ -626,8 +629,11 @@ impl rpc_api::wallet::RpcServer for RpcServerImpl<true> {
         transaction: thunder::types::Transaction,
         broadcast: Option<bool>,
     ) -> RpcResult<thunder::types::AuthorizedTransaction> {
-        let mut authorized =
-            self.app.wallet.authorize(transaction).map_err(custom_err)?;
+        let mut authorized = self
+            .app
+            .wallet
+            .authorize(rand::rng(), transaction)
+            .map_err(custom_err)?;
         if let Some(true) = broadcast {
             let () = self
                 .app

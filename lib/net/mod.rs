@@ -15,6 +15,7 @@ use sneed::{
     DatabaseUnique, Env, EnvError, RoTxn, RwTxn, RwTxnError, UnitKey,
     db::error::Error as DbError,
 };
+use thunder_types::authorization::BatchVerificationContext;
 use tokio_stream::StreamNotifyClose;
 use tracing::instrument;
 
@@ -165,10 +166,18 @@ pub fn make_server_endpoint(
 pub type PeerInfoRx =
     mpsc::UnboundedReceiver<(SocketAddr, Option<PeerConnectionInfo>)>;
 
-const ALPHANET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = &[PeerAddress {
-    host: url::Host::Domain("seed.alpha.ecash.eu.com"),
-    port: DEFAULT_PORT,
-}];
+const BETANET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
+    const DRIVECHA_IN: PeerAddress<&'static str> = PeerAddress {
+        host: url::Host::Domain("seed.beta.ecash.drivecha.in"),
+        port: DEFAULT_PORT,
+    };
+    // seed.beta.ecash.ninja
+    const ECASH_NINJA: PeerAddress<&'static str> = PeerAddress {
+        host: url::Host::Domain("seed.beta.ecash.ninja"),
+        port: DEFAULT_PORT,
+    };
+    &[DRIVECHA_IN, ECASH_NINJA]
+};
 
 const SIGNET_SEED_PEER_ADDRS: &[PeerAddress<&'static str>] = {
     const SIGNET_MINING_SERVER: PeerAddress<&'static str> = PeerAddress {
@@ -216,10 +225,10 @@ const fn seed_peer_addrs(
     network: Network,
 ) -> &'static [PeerAddress<&'static str>] {
     match network {
-        Network::Alphanet => ALPHANET_SEED_PEER_ADDRS,
-        Network::Signet => SIGNET_SEED_PEER_ADDRS,
-        Network::Regtest => &[],
+        Network::Betanet => BETANET_SEED_PEER_ADDRS,
         Network::Forknet => FORKNET_SEED_PEER_ADDRS,
+        Network::Regtest => &[],
+        Network::Signet => SIGNET_SEED_PEER_ADDRS,
     }
 }
 
@@ -297,6 +306,7 @@ impl DialKnownPeersHandle {
 pub struct Net {
     pub server: Endpoint,
     archive: Archive,
+    pub(crate) batch_verification_ctxt: BatchVerificationContext,
     pub dns_resolver: Arc<TokioResolver>,
     magic_bytes: peer_message::MagicBytes,
     state: State,
@@ -408,6 +418,8 @@ impl Net {
                 resolved_addr.first_ip_addr(),
                 resolved_addr.port(),
             );
+            // Quinn makes this check too, but its error only says "invalid
+            // remote address". This one names the address.
             if addr.ip().is_unspecified() {
                 return Err(error::ConnectPeer::UnspecfiedPeerIP(addr.ip()));
             }
@@ -431,6 +443,7 @@ impl Net {
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: self.archive.clone(),
+            batch_verification_ctxt: self.batch_verification_ctxt,
             magic_bytes: self.magic_bytes,
             resolved_address: resolved_addr,
             state: self.state.clone(),
@@ -553,6 +566,7 @@ impl Net {
         runtime: &tokio::runtime::Handle,
         env: &Env<heed::WithoutTls>,
         archive: Archive,
+        batch_verification_ctxt: BatchVerificationContext,
         magic_bytes_override: Option<peer_message::MagicBytes>,
         network: Network,
         state: State,
@@ -604,6 +618,7 @@ impl Net {
         let net = Net {
             server,
             archive,
+            batch_verification_ctxt,
             dns_resolver,
             magic_bytes,
             state,
@@ -685,6 +700,7 @@ impl Net {
         let connection_ctxt = PeerConnectionCtxt {
             env,
             archive: self.archive.clone(),
+            batch_verification_ctxt: self.batch_verification_ctxt,
             magic_bytes: self.magic_bytes,
             resolved_address: addr.into(),
             state: self.state.clone(),
@@ -761,6 +777,7 @@ mod test {
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
     };
+    use thunder_types::authorization::BatchVerificationContext;
 
     use anyhow::Context;
     use futures::StreamExt;
@@ -811,6 +828,7 @@ mod test {
             &tokio::runtime::Handle::current(),
             &env,
             archive,
+            BatchVerificationContext::new(&mut rand::rng()),
             None,
             Network::Regtest,
             state,
@@ -834,6 +852,7 @@ mod test {
         let connection_ctxt = super::PeerConnectionCtxt {
             env,
             archive: net.archive.clone(),
+            batch_verification_ctxt: net.batch_verification_ctxt,
             magic_bytes: net.magic_bytes,
             resolved_address: addr.into(),
             state: net.state.clone(),
@@ -1054,7 +1073,7 @@ mod test {
     #[test]
     fn seeds_reach_an_existing_database() -> anyhow::Result<()> {
         let (_temp_dir, env) = temp_env("seed-peers")?;
-        let network = Network::Alphanet;
+        let network = Network::Betanet;
         let known_peers = {
             let mut rwtxn = env.write_txn()?;
             let known_peers: DatabaseUnique<SerdeBincode<PeerAddress>, Unit> =

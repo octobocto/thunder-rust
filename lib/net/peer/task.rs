@@ -10,6 +10,7 @@ use fallible_iterator::FallibleIterator;
 use futures::{StreamExt as _, channel::mpsc};
 use quinn::SendStream;
 use sneed::EnvError;
+use thunder_types::Block;
 
 use crate::{
     archive,
@@ -638,7 +639,7 @@ impl ConnectionTask {
         };
         let resp = match (header, body) {
             (Some(header), Some(body)) => {
-                ResponseMessage::Block { header, body }
+                ResponseMessage::Block(Box::new(Block { header, body }))
             }
             (_, _) => ResponseMessage::NoBlock { block_hash },
         };
@@ -690,7 +691,11 @@ impl ConnectionTask {
         let txid = tx.transaction.txid();
         let validate_tx_result = {
             let rotxn = ctxt.env.read_txn().map_err(EnvError::from)?;
-            ctxt.state.validate_transaction(&rotxn, &tx)
+            ctxt.state.validate_transaction(
+                &rotxn,
+                &ctxt.batch_verification_ctxt,
+                &tx,
+            )
         };
         match validate_tx_result {
             Err(err) => {

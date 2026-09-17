@@ -14,13 +14,15 @@ use sneed::{
 use crate::{
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
-        Authorization, Authorized, AuthorizedTransaction, BlockHash,
-        BlockIndexEvents, Body, FilledTransaction, GetAddress, GetValue,
-        Header, InPoint, M6id, MerkleRoot, OutPoint, OutPointKey, Output,
-        PointedOutput, PointedOutputRef, SpentOutput, Transaction,
-        UtreexoNodeHash, UtreexoProof, VERSION, Verify, Version,
-        WithdrawalBundle, WithdrawalBundleStatus,
-        proto::mainchain::TwoWayPegData, state::WithdrawalBundleInfo,
+        Authorized, AuthorizedTransaction, BlockHash, BlockIndexEvents, Body,
+        FilledTransaction, GetAddress, GetValue, Header, InPoint, M6id,
+        MerkleRoot, OutPoint, OutPointKey, Output, PointedOutput,
+        PointedOutputRef, SpentOutput, Transaction, UtreexoNodeHash,
+        UtreexoProof, VERSION, Version, WithdrawalBundle,
+        WithdrawalBundleStatus,
+        authorization::{self, BatchVerificationContext},
+        proto::mainchain::TwoWayPegData,
+        state::WithdrawalBundleInfo,
     },
     util::Watchable,
 };
@@ -131,15 +133,23 @@ impl State {
                 .map_err(EnvError::from)?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")
             .map_err(EnvError::from)?;
-        if version
-            .try_get(&rwtxn, &())
-            .map_err(DbError::from)?
-            .is_none()
-        {
-            version
-                .put(&mut rwtxn, &(), &*VERSION)
-                .map_err(DbError::from)?;
-        }
+        match version.try_get(&rwtxn, &())? {
+            Some(db_version)
+                if db_version
+                    < Version {
+                        major: 0,
+                        minor: 18,
+                        patch: 0,
+                    } =>
+            {
+                return Err(Error::IncompatibleVersion {
+                    version: db_version,
+                    db_path: env.path().to_path_buf(),
+                });
+            }
+            Some(_) => (),
+            None => version.put(&mut rwtxn, &(), &*VERSION)?,
+        };
         rwtxn.commit().map_err(RwTxnError::from)?;
         Ok(Self {
             tip,
@@ -428,6 +438,7 @@ impl State {
     pub fn validate_transaction(
         &self,
         rotxn: &RoTxn,
+        batch_verification_ctxt: &BatchVerificationContext,
         transaction: &AuthorizedTransaction,
     ) -> Result<bitcoin::Amount, Error> {
         let filled_transaction =
@@ -441,7 +452,12 @@ impl State {
                 return Err(Error::WrongPubKeyForAddress);
             }
         }
-        if Authorization::verify_transaction(transaction).is_err() {
+        if authorization::verify_authorized_transaction(
+            batch_verification_ctxt,
+            transaction,
+        )
+        .is_err()
+        {
             return Err(Error::Authorization);
         }
         let fee = self.validate_filled_transaction(&filled_transaction)?;
@@ -556,10 +572,11 @@ impl State {
     pub fn validate_block(
         &self,
         rotxn: &RoTxn,
+        batch_verification_ctxt: &BatchVerificationContext,
         header: &Header,
         body: &Body,
     ) -> Result<(bitcoin::Amount, MerkleRoot), Error> {
-        block::validate(self, rotxn, header, body)
+        block::validate(batch_verification_ctxt, self, rotxn, header, body)
     }
 
     pub fn connect_block(
@@ -575,10 +592,11 @@ impl State {
     pub fn prevalidate_block(
         &self,
         rotxn: &RoTxn,
+        batch_verification_ctxt: &BatchVerificationContext,
         header: &Header,
         body: &Body,
     ) -> Result<PrevalidatedBlock, Error> {
-        block::prevalidate(self, rotxn, header, body)
+        block::prevalidate(batch_verification_ctxt, self, rotxn, header, body)
     }
 
     /// Connect a block using prevalidated data to avoid recomputation.
@@ -596,10 +614,16 @@ impl State {
     pub fn apply_block(
         &self,
         rwtxn: &mut RwTxn,
+        batch_verification_ctxt: &BatchVerificationContext,
         header: &Header,
         body: &Body,
     ) -> Result<(), Error> {
-        let pre = self.prevalidate_block(rwtxn, header, body)?;
+        let pre = self.prevalidate_block(
+            rwtxn,
+            batch_verification_ctxt,
+            header,
+            body,
+        )?;
         let _: MerkleRoot =
             self.connect_prevalidated_block(rwtxn, header, body, pre)?;
         Ok(())
@@ -718,8 +742,8 @@ mod test {
         });
         let tx = FilledTransaction {
             transaction: Transaction {
-                inputs: vec![(outpoint, utxo_hash)],
-                outputs: vec![value_output(Address::ALL_ZEROS, 1300)],
+                inputs: vec![(outpoint, utxo_hash)].into(),
+                outputs: vec![value_output(Address::ALL_ZEROS, 1300)].into(),
                 ..Default::default()
             },
             spent_utxos: vec![withdrawal],
