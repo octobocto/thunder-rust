@@ -28,6 +28,7 @@ pub const fn magic_bytes(network: Network) -> MagicBytes {
         Network::Signet => b3 |= 0b0000_0001,
         Network::Forknet => b3 |= 0b0000_0010,
         Network::Alphanet => b3 |= 0b000_0011,
+        Network::Betanet => b3 |= 0b0000_0100,
     }
     [b0, b1, b2, b3]
 }
@@ -300,5 +301,36 @@ impl ResponseMessage {
         } else {
             std::fmt::Debug::fmt(headers, f)
         }
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use std::collections::HashSet;
+
+    use super::{MagicBytes, Network, magic_bytes};
+
+    const EXPECTED: [(Network, MagicBytes); 5] = [
+        (Network::Regtest, [0x85, 0x18, 0x95, 0x00]),
+        (Network::Signet, [0x85, 0x18, 0x95, 0x01]),
+        (Network::Forknet, [0x85, 0x18, 0x95, 0x02]),
+        (Network::Alphanet, [0x85, 0x18, 0x95, 0x03]),
+        (Network::Betanet, [0x85, 0x18, 0x95, 0x04]),
+    ];
+
+    #[test]
+    fn network_magic_matches_the_baudot_encoding() {
+        for (network, expected) in EXPECTED {
+            assert_eq!(magic_bytes(network), expected, "{network:?}");
+        }
+    }
+
+    #[test]
+    fn network_magic_keeps_each_network_separate() {
+        let magics: HashSet<MagicBytes> = EXPECTED
+            .iter()
+            .map(|(network, _)| magic_bytes(*network))
+            .collect();
+        assert_eq!(magics.len(), EXPECTED.len());
     }
 }

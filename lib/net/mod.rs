@@ -217,6 +217,8 @@ const fn seed_peer_addrs(
 ) -> &'static [PeerAddress<&'static str>] {
     match network {
         Network::Alphanet => ALPHANET_SEED_PEER_ADDRS,
+        // No seed node runs on betanet yet.
+        Network::Betanet => &[],
         Network::Signet => SIGNET_SEED_PEER_ADDRS,
         Network::Regtest => &[],
         Network::Forknet => FORKNET_SEED_PEER_ADDRS,
