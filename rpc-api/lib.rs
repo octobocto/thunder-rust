@@ -31,7 +31,7 @@ pub mod node {
         Address, Authorization, Authorized, Block, BlockHash, BlockIndex,
         BlockIndexDeposit, BlockIndexSpend, BlockIndexTx, Body, Header,
         InPoint, M6id, MainchainSyncPhase, MainchainSyncProgress, MempoolTx,
-        MerkleRoot, OutPoint, Output, OutputContent, Pointed, PointedOutput,
+        MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
         SpentOutput, Transaction, Txid, WithdrawalBundle,
         WithdrawalBundleStatus,
         net::{Peer, PeerAddress, PeerConnectionStatus},
@@ -82,14 +82,14 @@ pub mod node {
     pub mod get_block {
         use jsonrpsee::{core::RpcResult, proc_macros::rpc};
         use serde::{Deserialize, Serialize, de::DeserializeOwned};
-        use thunder_types::{Authorization, Header, Output};
+        use thunder_types::{Authorization, Coinbase, Header};
         use utoipa::ToSchema;
 
         use crate::node::TransactionVerbose;
 
         #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
         pub struct BodyVerbose {
-            pub coinbase: Vec<Output>,
+            pub coinbase: Coinbase,
             pub transactions: Vec<TransactionVerbose>,
             pub authorizations: Vec<Authorization>,
         }
@@ -158,8 +158,9 @@ pub mod node {
             use l2l_openapi::open_api;
             use serde::Serialize;
             use thunder_types::{
-                Address, Authorization, Block, BlockHash, Body, Header,
-                MerkleRoot, Output, OutputContent, Transaction, Txid,
+                Address, Authorization, Block, BlockHash, Body, Coinbase,
+                CoinbaseTxid, Header, MerkleRoot, Output, OutputContent,
+                Transaction, Txid, transaction::Outputs,
             };
             use typewit::const_marker::Bool;
             use utoipa::ToSchema;
@@ -194,8 +195,9 @@ pub mod node {
             /// manually
             #[open_api(ref_schemas[
                 Address, Authorization, Block, BlockHash, BlockVerbose, Body,
-                BodyVerbose, Header, MerkleRoot, Output, OutputContent,
-                Transaction, TransactionVerbose, Txid, schema::BitcoinAddr,
+                BodyVerbose, Coinbase, CoinbaseTxid, Header, MerkleRoot,
+                Output, OutputContent, Outputs, Transaction,
+                TransactionVerbose, Txid, schema::BitcoinAddr,
                 schema::BitcoinBlockHash, schema::BitcoinOutPoint,
                 schema::UtreexoNodeHash, schema::UtreexoProof,
             ])]
@@ -262,8 +264,9 @@ pub mod node {
     #[open_api(
         merge_apis[get_block::RpcDoc],
         ref_schemas[
-            Address, Authorization, BlockHash, BlockIndexDeposit, BlockIndexSpend,
-            BlockIndexTx, Body, Header, InPoint, M6id, MainchainSyncPhase,
+            Address, Authorization, BlockHash, BlockIndexDeposit,
+            BlockIndexSpend, BlockIndexTx, Body, Header, InPoint, M6id,
+            MainchainSyncPhase,
             MerkleRoot, OutPoint, Output, OutputContent, PeerConnectionStatus,
             SpentOutput, Transaction, Txid, WithdrawalBundle,
             WithdrawalBundleInfo, WithdrawalBundleStatus, schema::BitcoinAddr,
@@ -352,7 +355,7 @@ pub mod node {
         async fn get_stxos(
             &self,
             addresses: HashSet<Address>,
-        ) -> RpcResult<Vec<Pointed<SpentOutput>>>;
+        ) -> RpcResult<Vec<PointedOutput<SpentOutput>>>;
 
         /// Get transaction by txid
         #[method(name = "get_transaction")]
@@ -429,9 +432,10 @@ pub mod wallet {
     use l2l_openapi::open_api;
     use serde::{Deserialize, Serialize};
     use thunder_types::{
-        Address, Authorization, Authorized, Block, BlockHash, Body, Header,
-        MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
-        Transaction, Txid,
+        Address, Authorization, Authorized, Block, BlockHash, Body, Coinbase,
+        CoinbaseTxid, Header, MerkleRoot, OutPoint, Output, OutputContent,
+        PointedOutput, Transaction, Txid,
+        transaction::Outputs,
         wallet::{Balance, TransferDests},
     };
     use utoipa::ToSchema;
@@ -450,10 +454,10 @@ pub mod wallet {
     }
 
     #[open_api(ref_schemas[
-        Address, Authorization, Block, BlockHash, Body, Header, MerkleRoot,
-        OutPoint, Output, OutputContent, Transaction, Txid,
-        schema::BitcoinAddr, schema::BitcoinBlockHash, schema::BitcoinOutPoint,
-        schema::UtreexoNodeHash, schema::UtreexoProof,
+        Address, Authorization, Block, BlockHash, Body, Coinbase, CoinbaseTxid,
+        Header, MerkleRoot, OutPoint, Output, OutputContent, Outputs,
+        Transaction, Txid, schema::BitcoinAddr, schema::BitcoinBlockHash,
+        schema::BitcoinOutPoint, schema::UtreexoNodeHash, schema::UtreexoProof,
     ])]
     #[rpc(client, server, server_bounds(Self: open_api::RpcServer))]
     pub trait Rpc {

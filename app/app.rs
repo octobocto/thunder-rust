@@ -15,7 +15,8 @@ use thunder::{
     miner::{self, Miner},
     node::{self, Node},
     types::{
-        self, Address, FilledTransaction, OutPoint, Output, Transaction,
+        self, Address, Coinbase, FilledTransaction, OutPoint, Output,
+        Transaction,
         proto::mainchain::{
             self,
             generated::{
@@ -35,20 +36,22 @@ use tonic_health::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    ComputeMerkleRoot(#[from] thunder::types::ComputeMerkleRootError),
     #[error("CUSF mainchain proto error")]
     CusfMainchain(#[from] thunder::types::proto::Error),
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("miner error")]
     Miner(#[from] miner::Error),
-    #[error(transparent)]
-    ModifyMemForest(#[from] thunder::types::ModifyMemForestError),
     #[error("node error")]
     Node(#[source] Box<node::Error>),
     #[error("No CUSF mainchain wallet client")]
     NoCusfMainchainWalletClient,
     #[error("Failed to request mainchain ancestor info for {block_hash}")]
     RequestMainchainAncestorInfos { block_hash: bitcoin::BlockHash },
+    #[error(transparent)]
+    Utreexo(#[from] thunder::types::UtreexoError),
     #[error("wallet error")]
     Wallet(#[from] wallet::Error),
 }
@@ -264,6 +267,7 @@ impl App {
     }
 
     pub fn new(config: Config) -> Result<Self, Error> {
+        let mut rng = rand::rng();
         // Node launches some tokio tasks for p2p networking, that is why we need a tokio runtime
         // here.
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -348,6 +352,7 @@ impl App {
             },
             cusf_mainchain,
             cusf_mainchain_block_producer,
+            &mut rng,
             &runtime,
         )?;
         let utxos = {
@@ -372,9 +377,9 @@ impl App {
             utxos,
             task: Arc::new(task),
             transaction: Arc::new(RwLock::new(Transaction {
-                inputs: vec![],
+                inputs: vec![].into(),
                 proof: Proof::default(),
-                outputs: vec![],
+                outputs: vec![].into(),
             })),
             runtime: Arc::new(runtime),
             local_pool,
@@ -397,7 +402,7 @@ impl App {
     }
 
     pub fn sign_and_send(&self, tx: Transaction) -> Result<(), Error> {
-        let authorized_transaction = self.wallet.authorize(tx)?;
+        let authorized_transaction = self.wallet.authorize(rand::rng(), tx)?;
         self.submit_transaction(authorized_transaction)
     }
 
@@ -505,16 +510,24 @@ impl App {
             const NUM_TRANSACTIONS: usize = 1000;
             let (txs, tx_fees) =
                 self.node.get_transactions(NUM_TRANSACTIONS)?;
-            let coinbase = match tx_fees {
-                bitcoin::Amount::ZERO => Vec::new(),
-                _ => vec![types::Output {
-                    // A template is built on every poll and mostly thrown
-                    // away, so it must not derive an address each time.
-                    address: self.wallet.get_receive_address()?,
-                    content: types::OutputContent::Value(tx_fees),
-                }],
+            let coinbase = {
+                let outputs = match tx_fees {
+                    bitcoin::Amount::ZERO => Vec::new(),
+                    _ => vec![types::Output {
+                        // A template is built on every poll and mostly thrown
+                        // away, so it must not derive an address each time.
+                        address: self.wallet.get_receive_address()?,
+                        content: types::OutputContent::Value(tx_fees),
+                    }],
+                };
+                Coinbase {
+                    memo: Vec::new(),
+                    outputs: outputs.into(),
+                }
             };
-            let (merkle_root, roots) = {
+            let merkle_root =
+                types::Body::compute_merkle_root(&coinbase, &txs)?;
+            let roots = {
                 let mut accumulator = if let Some(tip_hash) = tip_hash {
                     let rotxn = self
                         .node
@@ -528,18 +541,23 @@ impl App {
                 } else {
                     types::Accumulator::default()
                 };
-                let merkle_root = thunder::types::Body::modify_memforest(
-                    &coinbase,
+                let coinbase_txid = Coinbase::compute_txid(
+                    &merkle_root,
+                    &prev_main_hash,
+                    prev_side_hash.as_ref(),
+                );
+                let () = types::Body::modify_memforest(
+                    coinbase_txid,
+                    coinbase.outputs.as_slice(),
                     &txs,
                     &mut accumulator.0,
                 )?;
-                let roots = accumulator
+                accumulator
                     .0
                     .get_roots()
                     .iter()
                     .map(|root| root.get_data())
-                    .collect();
-                (merkle_root, roots)
+                    .collect()
             };
             let body = types::Body::new(
                 txs.into_iter().map(|tx| tx.into()).collect(),
@@ -560,8 +578,11 @@ impl App {
             });
             (bribe, header, body, tx_fees)
         } else {
-            let coinbase = Vec::new();
-            let (merkle_root, roots) = {
+            let coinbase = Default::default();
+            let txs: [FilledTransaction; 0] = [];
+            let merkle_root =
+                types::Body::compute_merkle_root(&coinbase, &txs)?;
+            let roots = {
                 let mut accumulator =
                     if let Some(prev_side_hash) = prev_side_hash {
                         let rotxn = self
@@ -576,18 +597,23 @@ impl App {
                     } else {
                         types::Accumulator::default()
                     };
-                let merkle_root = thunder::types::Body::modify_memforest::<
-                    FilledTransaction,
-                >(
-                    &coinbase, &[], &mut accumulator.0
+                let coinbase_txid = Coinbase::compute_txid(
+                    &merkle_root,
+                    &prev_main_hash,
+                    prev_side_hash.as_ref(),
+                );
+                let () = types::Body::modify_memforest(
+                    coinbase_txid,
+                    coinbase.outputs.as_slice(),
+                    &txs,
+                    &mut accumulator.0,
                 )?;
-                let roots = accumulator
+                accumulator
                     .0
                     .get_roots()
                     .iter()
                     .map(|root| root.get_data())
-                    .collect();
-                (merkle_root, roots)
+                    .collect()
             };
             let body = types::Body::new(Vec::new(), coinbase);
             let header = types::Header {

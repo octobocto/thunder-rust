@@ -38,15 +38,18 @@ use crate::{
     state::{self, State},
     types::{
         BmmResult, Body, Header, MerkleRoot, Tip,
+        authorization::BatchVerificationContext,
         net::ResolvedPeerAddress,
         proto::mainchain::{self, Event as MainchainBlockEvent},
     },
     util::{ErrorChain, join_set},
 };
 
+#[allow(clippy::too_many_arguments)]
 fn connect_tip_(
     rwtxn: &mut RwTxn<'_>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     header: &Header,
@@ -54,7 +57,12 @@ fn connect_tip_(
     two_way_peg_data: &mainchain::TwoWayPegData,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
-    let prevalidated = state.prevalidate_block(rwtxn, header, body)?;
+    let prevalidated = state.prevalidate_block(
+        rwtxn,
+        batch_verification_ctxt,
+        header,
+        body,
+    )?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let height = state.try_get_height(rwtxn)?;
         let merkle_root = state.connect_prevalidated_block(
@@ -222,6 +230,7 @@ fn is_fatal_reorg_error(err: &Error) -> bool {
 fn reorg_to_tip<ThreadLocalStorage>(
     env: &sneed::Env<ThreadLocalStorage>,
     archive: &Archive,
+    batch_verification_ctxt: &BatchVerificationContext,
     mempool: &MemPool,
     state: &State,
     new_tip: Tip,
@@ -352,6 +361,7 @@ fn reorg_to_tip<ThreadLocalStorage>(
         let () = match connect_tip_(
             &mut rwtxn,
             archive,
+            batch_verification_ctxt,
             mempool,
             state,
             &header,
@@ -476,12 +486,9 @@ impl NetTask {
                         peer_state_id: Some(peer_state_id),
                     },
                 ),
-                ref resp @ PeerResponse::Block {
-                    ref header,
-                    ref body,
-                },
+                ref resp @ PeerResponse::Block(ref block),
             ) => {
-                if header.hash() != block_hash {
+                if block.header.hash() != block_hash {
                     // Invalid response
                     tracing::warn!(
                         %addr,
@@ -495,8 +502,11 @@ impl NetTask {
                 {
                     let mut rwtxn =
                         ctxt.env.write_txn().map_err(EnvError::from)?;
-                    let () =
-                        ctxt.archive.put_body(&mut rwtxn, block_hash, body)?;
+                    let () = ctxt.archive.put_body(
+                        &mut rwtxn,
+                        block_hash,
+                        &block.body,
+                    )?;
                     rwtxn.commit().map_err(RwTxnError::from)?;
                 }
                 // Notify the peer connection if all requested block bodies are
@@ -578,7 +588,9 @@ impl NetTask {
                         main_block_hash,
                     };
 
-                    if header.prev_side_hash == tip.map(|tip| tip.block_hash) {
+                    if block.header.prev_side_hash
+                        == tip.map(|tip| tip.block_hash)
+                    {
                         tracing::trace!(
                             ?block_tip,
                             %addr,
@@ -869,6 +881,7 @@ impl NetTask {
             let _: bool = reorg_to_tip(
                 &ctxt.env,
                 &ctxt.archive,
+                &ctxt.net.batch_verification_ctxt,
                 &ctxt.mempool,
                 &ctxt.state,
                 best_side_tip,
@@ -980,7 +993,7 @@ impl NetTask {
 
                 // / Return:
                 // - The value to yield (maybe_socket_addr)
-                // - The state for the next iteration (())
+                // - The rng for the next iteration
                 // Wrapped in Result and Option
                 Result::<_, _>::Ok(Some((maybe_socket_addr, ())))
             };
@@ -1138,6 +1151,7 @@ impl NetTask {
                         reorg_to_tip(
                             &self.ctxt.env,
                             &self.ctxt.archive,
+                            &self.ctxt.net.batch_verification_ctxt,
                             &self.ctxt.mempool,
                             &self.ctxt.state,
                             new_tip,
@@ -1456,6 +1470,7 @@ mod test {
         net::Ipv4Addr,
         time::Duration,
     };
+    use thunder_types::authorization::BatchVerificationContext;
 
     use anyhow::Context;
     use futures::channel::mpsc;
@@ -1493,6 +1508,7 @@ mod test {
             },
             ValidatorClient::new(channel),
             None,
+            &mut rand::rng(),
             runtime,
         )?;
         Ok((temp_dir, node))
@@ -1552,17 +1568,23 @@ mod test {
                         content: OutputContent::Value(
                             bitcoin::Amount::from_sat(value),
                         ),
-                    }],
+                    }]
+                    .into(),
                     ..Default::default()
                 };
                 node.state.regenerate_proof(&rwtxn, &mut tx)?;
-                let tx = wallet.authorize(tx)?;
-                node.state.validate_transaction(&rwtxn, &tx)?;
+                let tx = wallet.authorize(rand::rng(), tx)?;
+                node.state.validate_transaction(
+                    &rwtxn,
+                    &BatchVerificationContext::new(&mut rand::rng()),
+                    &tx,
+                )?;
                 Ok(tx)
             };
-            let first_tx = make_tx(vec![inputs[0]], 900)?;
-            let conflict_tx = make_tx(vec![inputs[1], inputs[0]], 1_800)?;
-            let next_tx = make_tx(vec![inputs[1]], 900)?;
+            let first_tx = make_tx(vec![inputs[0]].into(), 900)?;
+            let conflict_tx =
+                make_tx(vec![inputs[1], inputs[0]].into(), 1_800)?;
+            let next_tx = make_tx(vec![inputs[1]].into(), 900)?;
             node.mempool.put(&mut rwtxn, &first_tx)?;
             rwtxn.commit()?;
 
