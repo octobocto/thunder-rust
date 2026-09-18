@@ -433,8 +433,8 @@ pub mod wallet {
     use serde::{Deserialize, Serialize};
     use thunder_types::{
         Address, Authorization, Authorized, Block, BlockHash, Body, Coinbase,
-        Header, MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
-        Transaction, Txid,
+        CoinbaseTxid, Header, MerkleRoot, OutPoint, Output, OutputContent,
+        PointedOutput, Transaction, Txid,
         transaction::Outputs,
         wallet::{Balance, TransferDests},
     };
@@ -454,9 +454,9 @@ pub mod wallet {
     }
 
     #[open_api(ref_schemas[
-        Address, Authorization, Block, BlockHash, Body, Coinbase, Header,
-        MerkleRoot, OutPoint, Output, OutputContent, Outputs, Transaction,
-        Txid, schema::BitcoinAddr, schema::BitcoinBlockHash,
+        Address, Authorization, Block, BlockHash, Body, Coinbase, CoinbaseTxid,
+        Header, MerkleRoot, OutPoint, Output, OutputContent, Outputs,
+        Transaction, Txid, schema::BitcoinAddr, schema::BitcoinBlockHash,
         schema::BitcoinOutPoint, schema::UtreexoNodeHash, schema::UtreexoProof,
     ])]
     #[rpc(client, server, server_bounds(Self: open_api::RpcServer))]
