@@ -6600,7 +6600,7 @@ dependencies = [
 
 [[package]]
 name = "thunder"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "async-lock",
@@ -6655,7 +6655,7 @@ dependencies = [
 
 [[package]]
 name = "thunder_app"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6699,7 +6699,7 @@ dependencies = [
 
 [[package]]
 name = "thunder_app_cli"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -6721,7 +6721,7 @@ dependencies = [
 
 [[package]]
 name = "thunder_app_rpc_api"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -6737,7 +6737,7 @@ dependencies = [
 
 [[package]]
 name = "thunder_integration_tests"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "bip300301_enforcer_integration_tests",
@@ -6761,7 +6761,7 @@ dependencies = [
 
 [[package]]
 name = "thunder_types"
-version = "0.18.1"
+version = "0.18.2"
 dependencies = [
  "anyhow",
  "bitcoin",
