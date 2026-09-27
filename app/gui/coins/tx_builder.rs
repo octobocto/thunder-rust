@@ -58,6 +58,7 @@ impl TxBuilder {
             // the grid, the value and the transaction all agree.
             self.base_tx
                 .inputs
+                .0
                 .retain(|(outpoint, _)| utxos_read.contains_key(outpoint));
             let mut remove = None;
             for (vout, (outpoint, _)) in self.base_tx.inputs.iter().enumerate()

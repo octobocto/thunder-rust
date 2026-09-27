@@ -146,6 +146,7 @@ pub struct Config {
     pub network: thunder::types::Network,
     pub network_magic_override: Option<thunder::net::peer_message::MagicBytes>,
     pub server_names: HashSet<String>,
+    pub spend_zero_conf_change: bool,
     pub wallet_dir: PathBuf,
 }
 
