@@ -669,8 +669,8 @@ mod same_block_chain {
     use bitcoin::hashes::Hash as _;
 
     use crate::{
-        Accumulator, AccumulatorDiff, Body, FilledTransaction, OutPoint,
-        Output, OutputContent, PointedOutput, Transaction,
+        Accumulator, AccumulatorDiff, Body, CoinbaseTxid, FilledTransaction,
+        OutPoint, Output, OutputContent, PointedOutput, Transaction,
         authorization::{SigningKey, get_address},
         hash,
     };
@@ -681,8 +681,7 @@ mod same_block_chain {
     /// block makes and spends reaches neither.
     #[test]
     fn the_template_and_validation_agree() -> anyhow::Result<()> {
-        let address =
-            get_address(&SigningKey::from_bytes(&[0x77; 32]).verifying_key());
+        let address = get_address((&SigningKey::new(&mut rand::rng())).into());
         let value_output = |sats: u64| Output {
             address,
             content: OutputContent::Value(bitcoin::Amount::from_sat(sats)),
@@ -700,9 +699,9 @@ mod same_block_chain {
 
         let parent_output = value_output(9_000);
         let parent = Transaction {
-            inputs: vec![(deposit_outpoint, hash(&deposit_pointed))],
+            inputs: vec![(deposit_outpoint, hash(&deposit_pointed))].into(),
             proof: Default::default(),
-            outputs: vec![parent_output.clone()],
+            outputs: vec![parent_output.clone()].into(),
         };
         let parent_outpoint = OutPoint::Regular {
             txid: parent.txid(),
@@ -714,9 +713,9 @@ mod same_block_chain {
         };
         let child_output = value_output(8_000);
         let child = Transaction {
-            inputs: vec![(parent_outpoint, hash(&parent_pointed))],
+            inputs: vec![(parent_outpoint, hash(&parent_pointed))].into(),
             proof: Default::default(),
-            outputs: vec![child_output.clone()],
+            outputs: vec![child_output.clone()].into(),
         };
         let child_pointed = PointedOutput {
             outpoint: OutPoint::Regular {
@@ -735,7 +734,11 @@ mod same_block_chain {
         };
 
         let mut from_template = seed()?;
-        let _ = Body::modify_memforest(
+        // The block carries no coinbase output, so its txid never reaches a
+        // leaf.
+        let coinbase_txid = CoinbaseTxid::from(hash(&"no coinbase"));
+        let () = Body::modify_memforest(
+            coinbase_txid,
             &[],
             &[
                 FilledTransaction {

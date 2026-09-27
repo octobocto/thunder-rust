@@ -261,7 +261,8 @@ impl MemPool {
             else {
                 continue;
             };
-            let Some(output) = parent.transaction.outputs.get(*vout as usize)
+            let Some(output) =
+                parent.transaction.outputs.as_slice().get(*vout as usize)
             else {
                 continue;
             };
@@ -563,9 +564,9 @@ mod test {
         AuthorizedTransaction {
             authorizations: Vec::new(),
             transaction: Transaction {
-                inputs: vec![(outpoint, utxo_hash)],
+                inputs: vec![(outpoint, utxo_hash)].into(),
                 proof: Default::default(),
-                outputs: vec![output],
+                outputs: vec![output].into(),
             },
         }
     }
@@ -594,8 +595,8 @@ mod test {
     }
 
     fn owner() -> (SigningKey, Address) {
-        let key = SigningKey::from_bytes(&[0x44; 32]);
-        let address = get_address(&key.verifying_key());
+        let key = SigningKey::new(&mut rand::rng());
+        let address = get_address((&key).into());
         (key, address)
     }
 
@@ -710,8 +711,7 @@ mod test {
         let (_temp_dir, env) = temp_env("trust")?;
         let mempool = MemPool::new(&env)?;
         let (_key, address) = owner();
-        let stranger =
-            get_address(&SigningKey::from_bytes(&[0x55; 32]).verifying_key());
+        let stranger = get_address((&SigningKey::new(&mut rand::rng())).into());
 
         // The wallet holds one confirmed coin and spends it. The change is
         // its own, so it is trusted.
@@ -758,8 +758,7 @@ mod test {
         let (_temp_dir, env) = temp_env("trust_chain")?;
         let mempool = MemPool::new(&env)?;
         let (_key, address) = owner();
-        let stranger =
-            get_address(&SigningKey::from_bytes(&[0x66; 32]).verifying_key());
+        let stranger = get_address((&SigningKey::new(&mut rand::rng())).into());
 
         let theirs = deposit_outpoint(0x07);
         let theirs_output = value_output(stranger, 5_000);

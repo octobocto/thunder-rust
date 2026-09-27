@@ -859,6 +859,7 @@ mod test {
         crate::state::State,
         crate::types::Header,
         crate::types::Body,
+        crate::types::authorization::BatchVerificationContext,
     )> {
         use bitcoin::hashes::Hash as _;
 
@@ -870,8 +871,13 @@ mod test {
         };
 
         let (temp_dir, env, state) = fresh_state(test_name)?;
-        let owner = SigningKey::from_bytes(&[0x33; 32]);
-        let owner_addr = get_address(&owner.verifying_key());
+        let mut rng = rand::rng();
+        let batch_verification_ctxt =
+            crate::types::authorization::BatchVerificationContext::new(
+                &mut rng,
+            );
+        let owner = SigningKey::new(&mut rng);
+        let owner_addr = get_address((&owner).into());
 
         // One confirmed deposit funds the chain.
         let deposit_outpoint = OutPoint::Deposit(bitcoin::OutPoint {
@@ -908,9 +914,9 @@ mod test {
         // Parent spends the deposit. Child spends the parent's output.
         let parent_output = value_output(owner_addr, 9_000);
         let parent = Transaction {
-            inputs: vec![(deposit_outpoint, deposit_hash)],
+            inputs: vec![(deposit_outpoint, deposit_hash)].into(),
             proof: accumulator.prove(&[deposit_leaf])?,
-            outputs: vec![parent_output.clone()],
+            outputs: vec![parent_output.clone()].into(),
         };
         let parent_outpoint = OutPoint::Regular {
             txid: parent.txid(),
@@ -922,19 +928,27 @@ mod test {
         };
         let child_output = value_output(owner_addr, 8_000);
         let child = Transaction {
-            inputs: vec![(parent_outpoint, hash(&parent_pointed))],
+            inputs: vec![(parent_outpoint, hash(&parent_pointed))].into(),
             // The accumulator holds no leaf for the parent's output, so the
             // child proves nothing.
             proof: accumulator.prove(&[])?,
-            outputs: vec![child_output.clone()],
+            outputs: vec![child_output.clone()].into(),
         };
 
-        let authorized_parent = authorize(&[(owner_addr, &owner)], parent)?;
-        let authorized_child = authorize(&[(owner_addr, &owner)], child)?;
+        let authorized_parent =
+            authorize(&mut rng, &[(owner_addr, &owner)], parent)?;
+        let authorized_child =
+            authorize(&mut rng, &[(owner_addr, &owner)], child)?;
         let body = if child_first {
-            Body::new(vec![authorized_child, authorized_parent], Vec::new())
+            Body::new(
+                vec![authorized_child, authorized_parent],
+                Coinbase::default(),
+            )
         } else {
-            Body::new(vec![authorized_parent, authorized_child], Vec::new())
+            Body::new(
+                vec![authorized_parent, authorized_child],
+                Coinbase::default(),
+            )
         };
 
         // The parent's output is made and spent inside the block, so the
@@ -1000,40 +1014,42 @@ mod test {
         ];
         let header = Header {
             merkle_root: Body::compute_merkle_root(
-                body.coinbase.as_slice(),
+                &body.coinbase,
                 filled.as_slice(),
             )?,
             prev_side_hash: None,
             prev_main_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
             roots: post_accumulator.get_roots(),
         };
-        Ok((temp_dir, env, state, header, body))
+        Ok((temp_dir, env, state, header, body, batch_verification_ctxt))
     }
 
     #[test]
     fn a_block_carries_a_parent_and_its_child() -> anyhow::Result<()> {
-        let (_temp_dir, env, state, header, body) =
+        let (_temp_dir, env, state, header, body, ctxt) =
             chained_block("a_block_carries_a_parent_and_its_child", false)?;
         let rotxn = env.read_txn()?;
-        let (fees, _) = state.validate_block(&rotxn, &header, &body)?;
+        let (fees, _) = state.validate_block(&rotxn, &ctxt, &header, &body)?;
         anyhow::ensure!(fees == bitcoin::Amount::from_sat(2_000));
         let () = state
-            .prevalidate_block(&rotxn, &header, &body)
+            .prevalidate_block(&rotxn, &ctxt, &header, &body)
             .map(|_| ())?;
         Ok(())
     }
 
     #[test]
     fn a_child_before_its_parent_is_rejected() -> anyhow::Result<()> {
-        let (_temp_dir, env, state, header, body) =
+        let (_temp_dir, env, state, header, body, ctxt) =
             chained_block("a_child_before_its_parent_is_rejected", true)?;
         let rotxn = env.read_txn()?;
         anyhow::ensure!(
-            state.validate_block(&rotxn, &header, &body).is_err(),
+            state.validate_block(&rotxn, &ctxt, &header, &body).is_err(),
             "a body that puts a child before its parent must not validate",
         );
         anyhow::ensure!(
-            state.prevalidate_block(&rotxn, &header, &body).is_err(),
+            state
+                .prevalidate_block(&rotxn, &ctxt, &header, &body)
+                .is_err(),
             "prevalidate must reject the same body",
         );
         Ok(())
