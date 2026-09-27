@@ -494,7 +494,7 @@ where
         }
     }
 
-    async fn run(mut self) -> Result<(), Error> {
+    async fn run_once(&mut self) -> Result<(), Error> {
         let (best_main_tip, block_event_stream) =
             Self::subscribe_block_events(&mut self.mainchain).await?;
         if !Self::request_ancestor_infos(
@@ -539,12 +539,13 @@ where
         }
         let block_event_stream =
             block_event_stream.map_ok(MailboxItem::BlockEvent);
-        let request_stream = self.request_rx.map(|(request, response_tx)| {
-            Ok(MailboxItem::Request {
-                request,
-                response_tx,
-            })
-        });
+        let request_stream =
+            (&mut self.request_rx).map(|(request, response_tx)| {
+                Ok(MailboxItem::Request {
+                    request,
+                    response_tx,
+                })
+            });
         let mut mailbox_stream =
             futures::stream::select(block_event_stream, request_stream);
 
@@ -575,6 +576,26 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Run the task, and start it again after it stops. The mainchain node can
+    /// stop at any time, and the node must connect to it again.
+    async fn run(mut self) {
+        const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+
+        loop {
+            match self.run_once().await {
+                Ok(()) => {
+                    tracing::warn!("Mainchain task: the event stream closed")
+                }
+                Err(err) => tracing::error!(
+                    "Mainchain task error: {:#}",
+                    ErrorChain::new(&err)
+                ),
+            }
+            tokio::time::sleep(RECONNECT_DELAY).await;
+            tracing::info!("Mainchain task: connecting to the mainchain node");
+        }
     }
 }
 
@@ -609,14 +630,7 @@ impl MainchainTaskHandle {
             request_rx,
             event_tx,
         };
-        let task = spawn(async move {
-            if let Err(err) = task.run().await {
-                tracing::error!(
-                    "Mainchain task error: {:#}",
-                    ErrorChain::new(&err)
-                );
-            }
-        });
+        let task = spawn(task.run());
         let task_handle = MainchainTaskHandle {
             task: Arc::new(task),
             request_tx,
@@ -660,5 +674,47 @@ impl Drop for MainchainTaskHandle {
         if let Some(task) = Arc::get_mut(&mut self.task) {
             task.abort()
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use bitcoin::hashes::Hash as _;
+
+    use super::{Archive, MainchainTaskHandle, Request, ValidatorClient};
+
+    /// The mainchain node can go away, and the task must take a request after
+    /// it does. A task that stops for good closes the request channel.
+    #[tokio::test]
+    async fn the_task_takes_a_request_after_the_mainchain_node_fails()
+    -> anyhow::Result<()> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_dir = temp_dir::TempDir::with_prefix(format!(
+            "thunder-mainchain-task-{}-{nanos}",
+            std::process::id()
+        ))?;
+        let mut opts = heed::EnvOpenOptions::new().read_txn_without_tls();
+        opts.map_size(64 * 1024 * 1024).max_dbs(Archive::NUM_DBS);
+        let env = unsafe { sneed::Env::open(&opts, temp_dir.path()) }?;
+        let archive = Archive::new(&env)?;
+        // Port 1 accepts nothing, so every call to the validator service fails.
+        let transport = tonic::transport::channel::Channel::from_static(
+            "http://127.0.0.1:1",
+        )
+        .connect_lazy();
+        let (task_handle, _event_rx) = MainchainTaskHandle::new(
+            env,
+            archive,
+            ValidatorClient::new(transport),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let request = Request::AncestorInfos(bitcoin::BlockHash::all_zeros());
+        anyhow::ensure!(
+            task_handle.request(request).is_ok(),
+            "the task stopped, so it took no request"
+        );
+        Ok(())
     }
 }
