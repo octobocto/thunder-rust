@@ -872,6 +872,18 @@ impl NetTask {
             .side_tips()
             .best_side_tip(&rwtxn)
             .map_err(archive::Error::from)?;
+        // a side tip from a BMM commitment can lack its header
+        let best_side_tip = match best_side_tip {
+            Some(best_side_tip)
+                if ctxt
+                    .archive
+                    .try_get_height(&rwtxn, best_side_tip.block_hash)?
+                    .is_some() =>
+            {
+                Some(best_side_tip)
+            }
+            _ => None,
+        };
         rwtxn.commit()?;
         if let Some(best_side_tip) = best_side_tip {
             let best_side_tip = Tip {
@@ -1476,6 +1488,10 @@ mod test {
     use futures::channel::mpsc;
 
     use crate::{
+        archive::{
+            self,
+            side_tips::{BmmCommitment, SidechainHeaderData},
+        },
         net::{PeerConnectionInfo, make_server_endpoint},
         node::{
             Config, Node,
@@ -1483,9 +1499,11 @@ mod test {
         },
         state,
         types::{
-            Accumulator, AccumulatorDiff, Network, OutPoint, OutPointKey,
-            Output, OutputContent, PointedOutput, Transaction, hash,
-            net::PeerConnectionStatus, proto::mainchain::ValidatorClient,
+            Accumulator, AccumulatorDiff, BlockHash, Network, OutPoint,
+            OutPointKey, Output, OutputContent, PointedOutput, Transaction,
+            hash,
+            net::PeerConnectionStatus,
+            proto::mainchain::{Event as MainchainBlockEvent, ValidatorClient},
         },
         wallet::Wallet,
     };
@@ -1745,6 +1763,48 @@ mod test {
             })
             .await?;
             remote.close(0_u32.into(), b"test complete");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_side_tip_without_a_header_does_not_stop_the_net_task()
+    -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            let (_temp_dir, node) = temp_node(&runtime)?;
+            node.task_handles.net.task.abort();
+            while !node.task_handles.net.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            let main_header = archive::test::main_header_info(0);
+            let mut rwtxn = node.env.write_txn()?;
+            node.archive.side_tips().connect_mainchain_tip(
+                &mut rwtxn,
+                main_header,
+                Some(BmmCommitment {
+                    sidechain_block_hash: BlockHash([7; 32]),
+                    sidechain_header_data: SidechainHeaderData {
+                        prev_side_hash: None,
+                        prev_main_hash: main_header.prev_block_hash,
+                    },
+                }),
+            )?;
+            rwtxn.commit()?;
+            let ctxt = NetTaskContext {
+                env: node.env.clone(),
+                archive: node.archive.clone(),
+                mainchain_task: node.task_handles.mainchain.clone(),
+                mempool: node.mempool.clone(),
+                net: node.net.clone(),
+                state: node.state.clone(),
+            };
+            NetTask::handle_mainchain_block_event(
+                &ctxt,
+                MainchainBlockEvent::DisconnectBlock {
+                    block_hash: main_header.block_hash,
+                },
+            )?;
             Ok(())
         })
     }
