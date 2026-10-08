@@ -830,6 +830,10 @@ impl Archive {
     ) -> Result<(), Error> {
         let mut stack = vec![block_hash];
         while let Some(block_hash) = stack.pop() {
+            // SAFETY: this loop also disconnects descendants
+            let () = unsafe {
+                self.side_tips.disconnect_sidechain_tip(rwtxn, &block_hash)
+            }?;
             self.accumulators.delete(rwtxn, &block_hash)?;
             self.block_hash_to_height.delete(rwtxn, &block_hash)?;
             if let Some(body) = self.bodies.try_get(rwtxn, &block_hash)? {
@@ -1671,7 +1675,10 @@ pub(crate) mod test {
     use bitcoin::hashes::Hash as _;
     use fallible_iterator::FallibleIterator as _;
 
-    use crate::{archive::Archive, types::proto::mainchain::BlockHeaderInfo};
+    use crate::{
+        archive::Archive,
+        types::{Header, MerkleRoot, proto::mainchain::BlockHeaderInfo},
+    };
 
     pub(crate) fn temp_env(
         test_name: &str,
@@ -1787,6 +1794,52 @@ pub(crate) mod test {
         archive
             .side_tips()
             .connect_mainchain_tip(&mut rwtxn, child, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalidated_blocks_leave_the_side_tips() -> anyhow::Result<()> {
+        let (_temp_dir, env) = temp_env("invalidated-blocks-leave-side-tips")?;
+        let archive = Archive::new(&env)?;
+        let mut rwtxn = env.write_txn()?;
+        let main_header = main_header_info(0);
+        archive.put_main_header_info(&mut rwtxn, &main_header)?;
+        let main_block_hash = main_header.block_hash;
+        let mut prev_side_hash = None;
+        let mut block_hashes = Vec::new();
+        for n in 0..3u8 {
+            let header = Header {
+                merkle_root: MerkleRoot::from([n; 32]),
+                prev_side_hash,
+                prev_main_hash: main_block_hash,
+                roots: Vec::new(),
+            };
+            let block_hash = header.hash();
+            archive.put_header(&mut rwtxn, &header)?;
+            archive.side_tips().connect_sidechain_tip(
+                &mut rwtxn,
+                main_block_hash,
+                bitcoin::Target::MAX.to_work(),
+                block_hash,
+                (&header).into(),
+            )?;
+            prev_side_hash = Some(block_hash);
+            block_hashes.push(block_hash);
+        }
+        archive.invalidate_block(&mut rwtxn, block_hashes[1])?;
+        for block_hash in &block_hashes[1..] {
+            assert!(
+                !archive
+                    .side_tips()
+                    .sidechain_tips()
+                    .contains_key(&rwtxn, block_hash)?
+            );
+        }
+        let best_side_tip = archive.side_tips().best_side_tip(&rwtxn)?;
+        assert_eq!(
+            best_side_tip.map(|tip| tip.block_hash),
+            Some(block_hashes[0])
+        );
         Ok(())
     }
 }
