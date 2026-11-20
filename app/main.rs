@@ -1,21 +1,22 @@
-use std::path::Path;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
+use std::path::Path;
 
 use clap::Parser as _;
 use mimalloc::MiMalloc;
-use tokio::{signal::ctrl_c, sync::oneshot};
+use thunder_app::app;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use thunder_app::rpc_server;
+use tokio::signal::ctrl_c;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
     Layer, filter as tracing_filter, fmt::format, layer::SubscriberExt,
 };
 
-mod app;
 mod cli;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod gui;
 mod line_buffer;
-mod rpc_server;
 mod util;
 
 use line_buffer::{LineBuffer, LineBufferWriter};
@@ -228,9 +229,6 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("This platform has no GUI, start with `--headless`");
     }
 
-    let (app_tx, app_rx) = oneshot::channel::<anyhow::Error>();
-    let shutdown = CancellationToken::new();
-
     let app_config = app::Config {
         add_peers: config.add_peers,
         datadir: config.datadir,
@@ -242,46 +240,46 @@ fn main() -> anyhow::Result<()> {
         server_names: config.server_names,
         wallet_dir: config.wallet_dir,
     };
-    let app = app::App::new(app_config).inspect(|app| {
-        // spawn rpc server
-        app.runtime.spawn({
-            let app = app.clone();
-            let shutdown = shutdown.clone();
-            async move {
-                tracing::info!("starting RPC server at `{}`", config.rpc_addr);
-                if let Err(err) = rpc_server::run_server(
-                    app,
-                    config.private_rpc_addr,
-                    config.rpc_addr,
-                    shutdown,
-                )
-                .await
-                {
-                    app_tx.send(err).expect("failed to send error to app");
-                }
-            }
-        });
-    });
+    let shutdown = CancellationToken::new();
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if !config.headless {
-        let rt = match &app {
-            Ok(app) => Arc::clone(&app.runtime),
-            Err(_) => {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()?;
-                Arc::new(rt)
-            }
-        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let app =
+            app::App::new(app_config, &runtime, &shutdown).inspect(|app| {
+                // spawn rpc server
+                app.runtime.spawn({
+                let app = app.clone();
+                async move {
+                    tracing::info!(
+                        "starting RPC server at `{}`",
+                        config.rpc_addr
+                    );
+                    match rpc_server::run_server(
+                        app,
+                        config.private_rpc_addr,
+                        config.rpc_addr,
+                        shutdown.clone(),
+                    )
+                    .await
+                    {
+                        Ok(server_handles) => tokio::select! {
+                            () = server_handles.stopped() => (),
+                            () = shutdown.cancelled() => std::process::exit(0),
+                        },
+                        Err(err) => {
+                            tracing::error!("Failed to run RPC server: {err:#}")
+                        }
+                    }
+                }
+            });
+            });
         let egui_app_config = EguiAppConfig {
             rpc_addr: config.rpc_addr,
         };
-        let _rt_guard = rt.enter();
-        rt.spawn(async move {
-            let () = shutdown.cancelled().await;
-            std::process::exit(0)
-        });
+        let _rt_guard = runtime.enter();
         // For GUI mode we want the GUI to start, even if the app fails to start.
         return run_egui_app(egui_app_config, line_buffer, app)
             .map_err(|e| anyhow::anyhow!("failed to run egui app: {e:#}"));
@@ -290,22 +288,29 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Running in headless mode");
     drop(line_buffer);
 
-    // If we're headless, we want to exit hard if the app fails to start.
-    let app = app?;
-
-    app.runtime.block_on(async move {
-        tokio::select! {
-            Ok(_) = ctrl_c() => {
-                tracing::info!("Shutting down due to process interruption");
-                Ok(())
-            }
-            () = shutdown.cancelled() => {
-                tracing::info!("Shutting down due to the stop RPC method");
-                Ok(())
-            }
-            Ok(err) = app_rx => {
-                Err(anyhow::anyhow!("received error from RPC server: {err:#} ({err:?})"))
-            }
-        }
-    })
+    let _ctrl_c_watcher: std::thread::JoinHandle<()> = {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let shutdown = shutdown.clone();
+        std::thread::spawn(move || {
+            runtime.block_on(async {
+                tokio::select! {
+                    Ok(()) = ctrl_c() => {
+                        tracing::info!(
+                            "Shutting down due to process interruption"
+                        );
+                        shutdown.cancel()
+                    }
+                    () = shutdown.cancelled() => (),
+                }
+            })
+        })
+    };
+    let config = thunder_app::Config {
+        app: app_config,
+        private_rpc_addr: config.private_rpc_addr,
+        rpc_addr: config.rpc_addr,
+    };
+    Ok(thunder_app::run(config, shutdown)?)
 }

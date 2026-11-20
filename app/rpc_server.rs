@@ -3,7 +3,7 @@ use std::{collections::HashSet, net::SocketAddr};
 use bitcoin::Amount;
 use jsonrpsee::{
     core::{RpcResult, async_trait, middleware::RpcServiceBuilder},
-    server::Server,
+    server::{AlreadyStoppedError, Server, ServerHandle},
     types::ErrorObject,
 };
 use thunder::types::{
@@ -669,9 +669,33 @@ impl MakeRequestId for RequestIdMaker {
     }
 }
 
-pub struct ServerAddesses {
-    pub _rpc_addr: SocketAddr,
-    pub _private_rpc_addr: SocketAddr,
+/// Handles to the RPC servers. A server stops when its handle drops.
+pub struct ServerHandles {
+    rpc: ServerHandle,
+    private_rpc: Option<ServerHandle>,
+}
+
+impl ServerHandles {
+    /// Wait until one of the servers stops
+    pub async fn stopped(self) {
+        match self.private_rpc {
+            Some(private_rpc) => tokio::select! {
+                () = self.rpc.stopped() => (),
+                () = private_rpc.stopped() => (),
+            },
+            None => self.rpc.stopped().await,
+        }
+    }
+
+    /// Stop the servers, and wait until every connection is closed
+    pub async fn stop(self) {
+        let _: Result<(), AlreadyStoppedError> = self.rpc.stop();
+        let () = self.rpc.stopped().await;
+        if let Some(private_rpc) = self.private_rpc {
+            let _: Result<(), AlreadyStoppedError> = private_rpc.stop();
+            let () = private_rpc.stopped().await;
+        }
+    }
 }
 
 /// The `stop` RPC method cancels `shutdown`
@@ -680,7 +704,7 @@ pub async fn run_server(
     private_rpc_addr: SocketAddr,
     rpc_addr: SocketAddr,
     shutdown: CancellationToken,
-) -> anyhow::Result<ServerAddesses> {
+) -> anyhow::Result<ServerHandles> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
 
     // Ordering here matters! Order here is from official docs on request IDs tracings
@@ -737,15 +761,13 @@ pub async fn run_server(
         .set_rpc_middleware(rpc_middleware())
         .build(rpc_addr)
         .await?;
-    let rpc_server_addr = server.local_addr()?;
 
-    let (_task_handle, server_addrs) = if private_rpc_addr != rpc_addr {
+    let server_handles = if private_rpc_addr != rpc_addr {
         let private_rpc_server = Server::builder()
             .set_http_middleware(http_middleware())
             .set_rpc_middleware(rpc_middleware())
             .build(private_rpc_addr)
             .await?;
-        let private_rpc_server_addr = private_rpc_server.local_addr()?;
 
         let rpc_server_handle = {
             let rpc_server_impl = RpcServerImpl::<false> {
@@ -780,17 +802,10 @@ pub async fn run_server(
                 .merge(rpc_api::wallet::RpcServer::into_rpc(rpc_server_impl))?;
             private_rpc_server.start(rpc_module)
         };
-        let server_addrs = ServerAddesses {
-            _rpc_addr: rpc_server_addr,
-            _private_rpc_addr: private_rpc_server_addr,
-        };
-        let task_handle = tokio::spawn(async {
-            tokio::select! {
-                () = rpc_server_handle.stopped() => (),
-                () = private_only_rpc_server_handle.stopped() => (),
-            }
-        });
-        (task_handle, server_addrs)
+        ServerHandles {
+            rpc: rpc_server_handle,
+            private_rpc: Some(private_only_rpc_server_handle),
+        }
     } else {
         let rpc_server_impl = RpcServerImpl::<true> { app, shutdown };
         let mut rpc_module =
@@ -809,13 +824,10 @@ pub async fn run_server(
         rpc_module
             .merge(rpc_api::wallet::RpcServer::into_rpc(rpc_server_impl))?;
 
-        let server_addrs = ServerAddesses {
-            _rpc_addr: rpc_server_addr,
-            _private_rpc_addr: rpc_server_addr,
-        };
-        let handle = server.start(rpc_module);
-        let task_handle = tokio::spawn(handle.stopped());
-        (task_handle, server_addrs)
+        ServerHandles {
+            rpc: server.start(rpc_module),
+            private_rpc: None,
+        }
     };
-    Ok(server_addrs)
+    Ok(server_handles)
 }
