@@ -1,4 +1,6 @@
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::path::Path;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::{net::SocketAddr, sync::Arc};
 
 use clap::Parser as _;
 use mimalloc::MiMalloc;
@@ -9,6 +11,7 @@ use tracing_subscriber::{
 
 mod app;
 mod cli;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod gui;
 mod line_buffer;
 mod rpc_server;
@@ -174,11 +177,13 @@ fn set_tracing_subscriber(
     Ok((line_buffer, rolling_log_guard))
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Debug)]
 struct EguiAppConfig {
     rpc_addr: SocketAddr,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn run_egui_app(
     config: EguiAppConfig,
     line_buffer: LineBuffer,
@@ -217,6 +222,11 @@ fn main() -> anyhow::Result<()> {
     )?;
     let () = config.log_all_fields("Loaded config");
 
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if !config.headless {
+        anyhow::bail!("This platform has no GUI, start with `--headless`");
+    }
+
     let (app_tx, app_rx) = oneshot::channel::<anyhow::Error>();
 
     let app_config = app::Config {
@@ -249,6 +259,7 @@ fn main() -> anyhow::Result<()> {
         });
     });
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if !config.headless {
         let rt = match &app {
             Ok(app) => Arc::clone(&app.runtime),

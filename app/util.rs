@@ -1,17 +1,23 @@
 //! Convenience and utility types and functions
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::{marker::Unpin, task::Poll};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use futures::{Stream, StreamExt};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use poll_promise::Promise;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 type PromiseStreamInner<S> = Promise<Option<(S, <S as Stream>::Item)>>;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub struct PromiseStream<S>(Option<PromiseStreamInner<S>>)
 where
     S: Send + Stream + 'static,
     S::Item: Send;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl<S> PromiseStream<S>
 where
     S: Send + Stream + Unpin + 'static,
@@ -55,6 +61,7 @@ where
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl<S> From<S> for PromiseStream<S>
 where
     S: Send + Stream + Unpin + 'static,

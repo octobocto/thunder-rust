@@ -3,7 +3,9 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
+use parking_lot::RwLock;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use parking_lot::{MappedRwLockReadGuard, RwLockReadGuard};
 use tracing_subscriber::fmt::MakeWriter;
 
 const DEFAULT_MAX_CAPACITY: usize = 0x1_000;
@@ -16,6 +18,7 @@ struct LineBufferInner {
     line_buffer: VecDeque<u8>,
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl LineBufferInner {
     fn as_str(&self) -> &str {
         // This is safe because the buffer is always checked to be valid
@@ -39,6 +42,7 @@ impl LineBuffer {
         Self(Arc::new(RwLock::new(inner)))
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn as_str(&self) -> MappedRwLockReadGuard<'_, str> {
         RwLockReadGuard::map(self.0.read(), |inner| inner.as_str())
     }

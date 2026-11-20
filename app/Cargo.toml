@@ -44,7 +44,7 @@ url = { workspace = true }
 utoipa = { workspace = true }
 uuid = { workspace = true }
 
-[dependencies.eframe]
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies.eframe]
 workspace = true
 features = ["glow", "wayland", "web_screen_reader", "x11"]
 

@@ -406,6 +406,7 @@ impl App {
         self.submit_transaction(authorized_transaction)
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub async fn get_new_main_address(
         &self,
     ) -> Result<bitcoin::Address<bitcoin::address::NetworkChecked>, Error> {
@@ -425,6 +426,7 @@ impl App {
         Ok(res)
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn get_new_main_address_blocking(
         &self,
     ) -> Result<bitcoin::Address<bitcoin::address::NetworkChecked>, Error> {
