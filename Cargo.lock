@@ -6722,6 +6722,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thunder_types",
+ "tokio",
  "typewit",
  "utoipa",
 ]

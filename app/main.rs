@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::Path, sync::Arc};
 use clap::Parser as _;
 use mimalloc::MiMalloc;
 use tokio::{signal::ctrl_c, sync::oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
     Layer, filter as tracing_filter, fmt::format, layer::SubscriberExt,
 };
@@ -218,6 +219,7 @@ fn main() -> anyhow::Result<()> {
     let () = config.log_all_fields("Loaded config");
 
     let (app_tx, app_rx) = oneshot::channel::<anyhow::Error>();
+    let shutdown = CancellationToken::new();
 
     let app_config = app::Config {
         add_peers: config.add_peers,
@@ -234,12 +236,14 @@ fn main() -> anyhow::Result<()> {
         // spawn rpc server
         app.runtime.spawn({
             let app = app.clone();
+            let shutdown = shutdown.clone();
             async move {
                 tracing::info!("starting RPC server at `{}`", config.rpc_addr);
                 if let Err(err) = rpc_server::run_server(
                     app,
                     config.private_rpc_addr,
                     config.rpc_addr,
+                    shutdown,
                 )
                 .await
                 {
@@ -263,6 +267,10 @@ fn main() -> anyhow::Result<()> {
             rpc_addr: config.rpc_addr,
         };
         let _rt_guard = rt.enter();
+        rt.spawn(async move {
+            let () = shutdown.cancelled().await;
+            std::process::exit(0)
+        });
         // For GUI mode we want the GUI to start, even if the app fails to start.
         return run_egui_app(egui_app_config, line_buffer, app)
             .map_err(|e| anyhow::anyhow!("failed to run egui app: {e:#}"));
@@ -278,6 +286,10 @@ fn main() -> anyhow::Result<()> {
         tokio::select! {
             Ok(_) = ctrl_c() => {
                 tracing::info!("Shutting down due to process interruption");
+                Ok(())
+            }
+            () = shutdown.cancelled() => {
+                tracing::info!("Shutting down due to the stop RPC method");
                 Ok(())
             }
             Ok(err) = app_rx => {
