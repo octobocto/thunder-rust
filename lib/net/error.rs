@@ -125,6 +125,13 @@ impl From<rwtxn::Commit> for ConnectPeer {
 
 #[derive(Debug, Error)]
 pub enum ResolvePeerAddress {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[error("failed to resolve host for domain ({domain})")]
+    Lookup {
+        domain: String,
+        source: std::io::Error,
+    },
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[error(transparent)]
     Net(Box<hickory_resolver::net::NetError>),
     #[error("unable to resolve host for domain ({domain})")]
@@ -156,6 +163,7 @@ pub enum Error {
     AlreadyConnected(#[from] AlreadyConnected),
     #[error("bincode error")]
     Bincode(#[from] bincode::Error),
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     #[error("failed to build DNS resolver")]
     BuildDnsResolver(#[source] hickory_resolver::net::NetError),
     #[error("failed to connect to peer ({peer_addr})")]

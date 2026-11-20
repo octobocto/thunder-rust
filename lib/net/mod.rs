@@ -8,6 +8,7 @@ use std::{
 use fallible_iterator::FallibleIterator;
 use futures::{StreamExt, channel::mpsc};
 use heed::types::{SerdeBincode, Unit};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hickory_resolver::TokioResolver;
 use parking_lot::RwLock;
 use quinn::{ClientConfig, Endpoint, ServerConfig};
@@ -227,13 +228,68 @@ const fn seed_peer_addrs(
     }
 }
 
+/// Resolves host names. On Android and iOS it uses the system resolver, so
+/// a VPN or private DNS on the phone applies. Elsewhere it uses hickory with
+/// the system config.
+/// Cheap to clone.
+#[derive(Clone)]
+pub struct DnsResolver {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    hickory: Arc<TokioResolver>,
+}
+
+impl DnsResolver {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn new() -> Result<Self, Error> {
+        let hickory = hickory_resolver::Resolver::builder_tokio()
+            .map_err(Error::BuildDnsResolver)?
+            .build()
+            .map_err(Error::BuildDnsResolver)?;
+        Ok(Self {
+            hickory: Arc::new(hickory),
+        })
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn new() -> Result<Self, Error> {
+        Ok(Self {})
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn lookup_ip(
+        &self,
+        domain: &str,
+    ) -> Result<Vec<IpAddr>, error::ResolvePeerAddress> {
+        let lookup = self
+            .hickory
+            .lookup_ip(domain)
+            .await
+            .map_err(|err| error::ResolvePeerAddress::Net(Box::new(err)))?;
+        Ok(lookup.into_iter().collect())
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    async fn lookup_ip(
+        &self,
+        domain: &str,
+    ) -> Result<Vec<IpAddr>, error::ResolvePeerAddress> {
+        let addrs =
+            tokio::net::lookup_host((domain, 0)).await.map_err(|err| {
+                error::ResolvePeerAddress::Lookup {
+                    domain: domain.to_owned(),
+                    source: err,
+                }
+            })?;
+        Ok(addrs.map(|addr| addr.ip()).collect())
+    }
+}
+
 pub async fn resolve_peer_address<S>(
-    dns_resolver: &TokioResolver,
+    dns_resolver: &DnsResolver,
     peer_addr: PeerAddress<S>,
 ) -> Result<ResolvedPeerAddress<S>, error::ResolvePeerAddress>
 where
     S: std::fmt::Display,
-    for<'a> &'a S: hickory_resolver::proto::rr::IntoName,
 {
     match peer_addr.host {
         url::Host::Ipv4(ipv4) => Ok(ResolvedPeerAddress::Static(
@@ -244,9 +300,8 @@ where
         )),
         url::Host::Domain(domain) => {
             let mut addrs: Vec<_> = dns_resolver
-                .lookup_ip(&domain)
-                .await
-                .map_err(|err| error::ResolvePeerAddress::Net(Box::new(err)))?
+                .lookup_ip(&domain.to_string())
+                .await?
                 .into_iter()
                 .filter(|addr| !addr.is_unspecified())
                 .collect();
@@ -302,7 +357,7 @@ pub struct Net {
     pub server: Endpoint,
     archive: Archive,
     pub(crate) batch_verification_ctxt: BatchVerificationContext,
-    pub dns_resolver: Arc<TokioResolver>,
+    pub dns_resolver: DnsResolver,
     magic_bytes: peer_message::MagicBytes,
     state: State,
     active_peers: Arc<RwLock<HashMap<SocketAddr, PeerConnectionHandle>>>,
@@ -603,12 +658,7 @@ impl Net {
         rwtxn.commit().map_err(RwTxnError::from)?;
         let magic_bytes = magic_bytes_override
             .unwrap_or_else(|| peer_message::magic_bytes(network));
-        let dns_resolver = {
-            let builder = hickory_resolver::Resolver::builder_tokio()
-                .map_err(Error::BuildDnsResolver)?;
-            let resolver = builder.build().map_err(Error::BuildDnsResolver)?;
-            Arc::new(resolver)
-        };
+        let dns_resolver = DnsResolver::new()?;
         let (peer_info_tx, peer_info_rx) = mpsc::unbounded();
         let net = Net {
             server,
@@ -770,6 +820,7 @@ mod test {
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
     use thunder_types::authorization::BatchVerificationContext;
@@ -783,7 +834,7 @@ mod test {
     use crate::{
         archive::Archive,
         net::{
-            Net, PeerAddress, PeerConnectionInfo, PeerInfoRx,
+            DnsResolver, Net, PeerAddress, PeerConnectionInfo, PeerInfoRx,
             ensure_seed_peers, make_server_endpoint, resolve_peer_address,
             seed_peer_addrs,
         },
@@ -1096,8 +1147,11 @@ mod test {
     /// A seed names a host and a port, and the resolver keeps both.
     #[tokio::test]
     async fn a_seed_name_resolves_with_its_port() -> anyhow::Result<()> {
-        let dns_resolver =
-            hickory_resolver::Resolver::builder_tokio()?.build()?;
+        let dns_resolver = DnsResolver {
+            hickory: Arc::new(
+                hickory_resolver::Resolver::builder_tokio()?.build()?,
+            ),
+        };
         let peer_addr: PeerAddress = "localhost:4009".parse()?;
         let resolved = resolve_peer_address(&dns_resolver, peer_addr).await?;
         assert_eq!(resolved.port(), 4009);
