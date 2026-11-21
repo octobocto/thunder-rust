@@ -116,6 +116,37 @@ impl SyncProgress {
     }
 }
 
+/// Maximum number of mainchain headers to store in one write transaction
+/// during an ancestor back-fill
+const STORE_ANCESTOR_INFOS_BATCH_SIZE: usize = 1000;
+
+/// Store mainchain header infos and block infos, ordered from oldest to
+/// newest, in write transactions of at most
+/// [`STORE_ANCESTOR_INFOS_BATCH_SIZE`] headers.
+/// The parent of each header must be stored, or must come earlier in
+/// `block_infos`.
+fn store_ancestor_infos(
+    env: &sneed::Env<heed::WithoutTls>,
+    archive: &Archive,
+    sync_progress: &SyncProgress,
+    block_infos: &[(BlockHeaderInfo, mainchain::BlockInfo)],
+) -> Result<(), error::RequestAncestorInfos> {
+    for batch in block_infos.chunks(STORE_ANCESTOR_INFOS_BATCH_SIZE) {
+        let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
+        for (header_info, block_info) in batch {
+            let () = archive.put_main_header_info(&mut rwtxn, header_info)?;
+            let () = archive.put_main_block_info(
+                &mut rwtxn,
+                header_info.block_hash,
+                block_info,
+            )?;
+        }
+        rwtxn.commit().map_err(RwTxnError::from)?;
+        sync_progress.wrote_headers(batch.len() as u32);
+    }
+    Ok(())
+}
+
 struct ContextMut<'a, Transport> {
     env: &'a sneed::Env<heed::WithoutTls>,
     archive: &'a Archive,
@@ -241,25 +272,13 @@ where
         }
         let tip_height = block_infos[0].0.height;
         block_infos.reverse();
-        // Writing all headers during IBD can starve archive readers.
         tracing::trace!(%block_hash, "storing ancestor headers/info");
         sync_progress.start_writing(tip_height, block_infos.len() as u32);
-        task::block_in_place(|| {
-            let mut rwtxn = env.write_txn().map_err(EnvError::from)?;
-            for (header_info, block_info) in block_infos {
-                let () =
-                    archive.put_main_header_info(&mut rwtxn, &header_info)?;
-                let () = archive.put_main_block_info(
-                    &mut rwtxn,
-                    header_info.block_hash,
-                    &block_info,
-                )?;
-                sync_progress.wrote_headers(1);
-            }
-            rwtxn.commit().map_err(RwTxnError::from)?;
-            tracing::trace!(%block_hash, "stored ancestor headers/info");
-            Ok(true)
-        })
+        let () = task::block_in_place(|| {
+            store_ancestor_infos(env, archive, sync_progress, &block_infos)
+        })?;
+        tracing::trace!(%block_hash, "stored ancestor headers/info");
+        Ok(true)
     }
 
     /// Sync mainchain state to the specified mainchain tip.
@@ -767,14 +786,20 @@ mod test {
     use parking_lot::Mutex;
     use tonic::codegen::{BoxFuture, Service, http};
 
-    use super::{MainchainTask, SyncProgress};
+    use super::{
+        MainchainTask, STORE_ANCESTOR_INFOS_BATCH_SIZE, SyncProgress,
+        store_ancestor_infos,
+    };
     use crate::{
-        archive::{Archive, test::main_header_info},
+        archive::{self, Archive, test::main_header_info},
+        node::error::mainchain_task as error,
         types::{
             MainchainSyncPhase, MainchainSyncProgress,
             proto::{
                 common::{ConsensusHex, ReverseHex},
-                mainchain::{ValidatorClient, generated},
+                mainchain::{
+                    BlockHeaderInfo, BlockInfo, ValidatorClient, generated,
+                },
             },
         },
     };
@@ -1008,6 +1033,86 @@ mod test {
                 "tip_height": 0,
             })
         );
+        Ok(())
+    }
+
+    /// Mainchain header infos and block infos of [`main_header_info`] from
+    /// genesis, oldest first
+    fn main_block_infos(len: u32) -> Vec<(BlockHeaderInfo, BlockInfo)> {
+        (0..len)
+            .map(|height| (main_header_info(height), BlockInfo::default()))
+            .collect()
+    }
+
+    #[test]
+    fn failed_store_keeps_committed_batches() -> anyhow::Result<()> {
+        let (_temp_dir, env) = temp_env()?;
+        let archive = Archive::new(&env)?;
+        let chain_len = 2 * STORE_ANCESTOR_INFOS_BATCH_SIZE as u32 + 7;
+        let mut block_infos = main_block_infos(chain_len);
+        let orphan_index = STORE_ANCESTOR_INFOS_BATCH_SIZE + 3;
+        block_infos[orphan_index].0.prev_block_hash =
+            main_header_info(chain_len).block_hash;
+        let res = store_ancestor_infos(
+            &env,
+            &archive,
+            &SyncProgress::default(),
+            &block_infos,
+        );
+        assert!(matches!(
+            res,
+            Err(error::RequestAncestorInfos::Archive(
+                archive::Error::NoMainHeaderInfo(_)
+            ))
+        ));
+        let rotxn = env.read_txn()?;
+        for (index, (header_info, _)) in block_infos.iter().enumerate() {
+            let stored = archive
+                .try_get_main_header_info(&rotxn, &header_info.block_hash)?
+                .is_some();
+            assert_eq!(
+                stored,
+                index < STORE_ANCESTOR_INFOS_BATCH_SIZE,
+                "header {index}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ancestor_walk_resumes_after_committed_batches() -> anyhow::Result<()> {
+        const TIP_HEIGHT: u32 = 2 * STORE_ANCESTOR_INFOS_BATCH_SIZE as u32 + 6;
+        let (_temp_dir, env) = temp_env()?;
+        let archive = Archive::new(&env)?;
+        let block_infos = main_block_infos(TIP_HEIGHT + 1);
+        let () = store_ancestor_infos(
+            &env,
+            &archive,
+            &SyncProgress::default(),
+            &block_infos[..STORE_ANCESTOR_INFOS_BATCH_SIZE],
+        )?;
+        let mock = MockValidator::default();
+        let mut client = ValidatorClient::new(mock.clone());
+        let runtime = tokio::runtime::Runtime::new()?;
+        let available = runtime.block_on(
+            MainchainTask::<MockValidator>::request_ancestor_infos(
+                &env,
+                &archive,
+                &mut client,
+                &mock.sync_progress,
+                main_header_info(TIP_HEIGHT).block_hash,
+            ),
+        )?;
+        assert!(available);
+        let rotxn = env.read_txn()?;
+        for (header_info, _) in &block_infos {
+            assert_eq!(
+                archive.get_main_height(&rotxn, header_info.block_hash)?,
+                header_info.height
+            );
+            let _block_info: BlockInfo =
+                archive.get_main_block_info(&rotxn, &header_info.block_hash)?;
+        }
         Ok(())
     }
 }
