@@ -53,10 +53,17 @@ workspace = true
 features = ["macros", "rt-multi-thread", "signal"]
 
 [dev-dependencies]
+jsonrpsee = { workspace = true, features = ["http-client"] }
 reserve-port = { workspace = true }
+serde_json = { workspace = true }
+temp-dir = { workspace = true }
 
 [lints]
 workspace = true
+
+[lib]
+name = "thunder_app"
+path = "lib.rs"
 
 [[bin]]
 name = "thunder_app"

@@ -28,7 +28,7 @@ use thunder::{
     wallet::{self, Wallet},
 };
 use tokio::{spawn, sync::RwLock as TokioRwLock, task::JoinHandle};
-use tokio_util::task::LocalPoolHandle;
+use tokio_util::{sync::CancellationToken, task::LocalPoolHandle};
 use tonic_health::{
     ServingStatus,
     pb::{HealthCheckRequest, health_client::HealthClient},
@@ -36,6 +36,8 @@ use tonic_health::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Shutdown requested while waiting for the CUSF mainchain")]
+    Cancelled,
     #[error(transparent)]
     ComputeMerkleRoot(#[from] thunder::types::ComputeMerkleRootError),
     #[error("CUSF mainchain proto error")]
@@ -129,7 +131,7 @@ pub struct App {
     pub utxos: Arc<RwLock<HashMap<OutPoint, Output>>>,
     task: Arc<JoinHandle<()>>,
     pub transaction: Arc<RwLock<Transaction>>,
-    pub runtime: Arc<tokio::runtime::Runtime>,
+    pub runtime: tokio::runtime::Handle,
     pub local_pool: LocalPoolHandle,
 }
 
@@ -266,13 +268,16 @@ impl App {
         }
     }
 
-    pub fn new(config: Config) -> Result<Self, Error> {
+    /// Returns [`Error::Cancelled`] if `shutdown` is cancelled while the
+    /// CUSF mainchain services are unavailable.
+    /// The node spawns its tasks on `runtime`. They stop when `runtime`
+    /// drops.
+    pub fn new(
+        config: Config,
+        runtime: &tokio::runtime::Runtime,
+        shutdown: &CancellationToken,
+    ) -> Result<Self, Error> {
         let mut rng = rand::rng();
-        // Node launches some tokio tasks for p2p networking, that is why we need a tokio runtime
-        // here.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
 
         let wallet = Wallet::new(&config.wallet_dir.join("wallet.mdb"))?;
         if let Some(seed_phrase_path) = &config.mnemonic_seed_phrase_path {
@@ -301,10 +306,15 @@ impl App {
                 block_producer,
                 miner,
                 wallet,
-            } = runtime.block_on(Self::wait_for_proto_support(
-                transport.clone(),
-                &config.mainchain_grpc_url,
-            ));
+            } = runtime.block_on(async {
+                tokio::select! {
+                    proto_support = Self::wait_for_proto_support(
+                        transport.clone(),
+                        &config.mainchain_grpc_url,
+                    ) => Ok(proto_support),
+                    () = shutdown.cancelled() => Err(Error::Cancelled),
+                }
+            })?;
             let mining_client = if miner {
                 Some(mainchain::MiningClient::new(transport.clone()))
             } else {
@@ -353,7 +363,7 @@ impl App {
             cusf_mainchain,
             cusf_mainchain_block_producer,
             &mut rng,
-            &runtime,
+            runtime,
         )?;
         let utxos = {
             let mut utxos = wallet.get_utxos()?;
@@ -381,7 +391,7 @@ impl App {
                 proof: Proof::default(),
                 outputs: vec![].into(),
             })),
-            runtime: Arc::new(runtime),
+            runtime: runtime.handle().clone(),
             local_pool,
         })
     }
@@ -754,7 +764,7 @@ impl Drop for App {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::{net::SocketAddr, time::Duration};
 
     use thunder::types::proto::mainchain::generated::validator_service_server;
@@ -771,7 +781,7 @@ mod test {
         .connect_lazy()
     }
 
-    async fn serve_validator_service(addr: SocketAddr) {
+    pub(crate) async fn serve_validator_service(addr: SocketAddr) {
         let (health_reporter, health_service) =
             tonic_health::server::health_reporter();
         let () = health_reporter
