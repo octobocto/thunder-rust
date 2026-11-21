@@ -68,7 +68,7 @@ pub mod node {
 
         /// Stop the node
         #[method(name = "stop")]
-        async fn stop(&self);
+        async fn stop(&self) -> RpcResult<()>;
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

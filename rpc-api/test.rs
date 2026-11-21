@@ -1,6 +1,17 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
+use jsonrpsee::{
+    RpcModule, http_client::HttpClient, server::Server, types::ErrorObjectOwned,
+};
 use utoipa::openapi::{self, Ref, RefOr, Schema};
+
+use crate::node::PrivateRpcClient as _;
 
 /// Get all component refs
 trait ComponentRefs {
@@ -316,5 +327,26 @@ fn check_schemas() -> anyhow::Result<()> {
     let () = check_schema::<crate::node::get_block::RpcDoc>()?;
     let () = check_schema::<crate::node::RpcDoc>()?;
     let () = check_schema::<crate::wallet::RpcDoc>()?;
+    Ok(())
+}
+
+/// The client must send `stop` as a request, because the server does not run
+/// a method for a notification
+#[tokio::test]
+async fn stop_reaches_the_server() -> anyhow::Result<()> {
+    let server = Server::builder().build("127.0.0.1:0").await?;
+    let server_addr = server.local_addr()?;
+    let stop_called = Arc::new(AtomicBool::new(false));
+    let mut rpc_module = RpcModule::new(Arc::clone(&stop_called));
+    rpc_module.register_method("stop", |_params, stop_called, _ext| {
+        stop_called.store(true, Ordering::SeqCst);
+        Ok::<(), ErrorObjectOwned>(())
+    })?;
+    let server_handle = server.start(rpc_module);
+    let client =
+        HttpClient::builder().build(format!("http://{server_addr}"))?;
+    let () = client.stop().await?;
+    assert!(stop_called.load(Ordering::SeqCst));
+    server_handle.stop()?;
     Ok(())
 }

@@ -12,6 +12,7 @@ use thunder::types::{
     wallet::{Balance, TransferDests},
 };
 use thunder_app_rpc_api::{self as rpc_api, typewit::const_marker::Bool};
+use tokio_util::sync::CancellationToken;
 use tower_http::{
     cors::CorsLayer,
     request_id::{
@@ -35,9 +36,9 @@ where
 }
 
 #[derive(Clone)]
-#[repr(transparent)]
 pub struct RpcServerImpl<const ENABLE_PRIVATE_API: bool> {
     app: App,
+    shutdown: CancellationToken,
 }
 
 pub struct PrivateOnlyRpcServerImpl;
@@ -111,8 +112,9 @@ impl rpc_api::node::PrivateRpcServer for RpcServerImpl<true> {
         self.app.node.remove_from_mempool(txid).map_err(custom_err)
     }
 
-    async fn stop(&self) {
-        std::process::exit(0);
+    async fn stop(&self) -> RpcResult<()> {
+        self.shutdown.cancel();
+        Ok(())
     }
 }
 
@@ -672,10 +674,12 @@ pub struct ServerAddesses {
     pub _private_rpc_addr: SocketAddr,
 }
 
+/// The `stop` RPC method cancels `shutdown`
 pub async fn run_server(
     app: App,
     private_rpc_addr: SocketAddr,
     rpc_addr: SocketAddr,
+    shutdown: CancellationToken,
 ) -> anyhow::Result<ServerAddesses> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
 
@@ -744,7 +748,10 @@ pub async fn run_server(
         let private_rpc_server_addr = private_rpc_server.local_addr()?;
 
         let rpc_server_handle = {
-            let rpc_server_impl = RpcServerImpl::<false> { app: app.clone() };
+            let rpc_server_impl = RpcServerImpl::<false> {
+                app: app.clone(),
+                shutdown: shutdown.clone(),
+            };
             let mut rpc_module =
                 rpc_api::open_api::RpcServer::into_rpc(rpc_server_impl.clone());
             rpc_module.merge(
@@ -757,7 +764,7 @@ pub async fn run_server(
             server.start(rpc_module)
         };
         let private_only_rpc_server_handle = {
-            let rpc_server_impl = RpcServerImpl::<true> { app };
+            let rpc_server_impl = RpcServerImpl::<true> { app, shutdown };
             let mut rpc_module = rpc_api::open_api::RpcServer::into_rpc(
                 PrivateOnlyRpcServerImpl,
             );
@@ -785,7 +792,7 @@ pub async fn run_server(
         });
         (task_handle, server_addrs)
     } else {
-        let rpc_server_impl = RpcServerImpl::<true> { app };
+        let rpc_server_impl = RpcServerImpl::<true> { app, shutdown };
         let mut rpc_module =
             rpc_api::open_api::RpcServer::into_rpc(rpc_server_impl.clone());
         rpc_module.merge(rpc_api::node::PrivateRpcServer::into_rpc(
