@@ -19,7 +19,7 @@ use tonic::transport::Channel;
 use crate::{
     archive::Archive,
     mempool::{self, MemPool},
-    net::{DialKnownPeersHandle, Net},
+    net::{DialKnownPeersHandle, DnsResolver, Net},
     state::{self, State},
     types::{
         Accumulator, Address, AmountOverflowError, AmountUnderflowError,
@@ -211,7 +211,7 @@ where
         f(&self.cusf_mainchain)
     }
 
-    pub fn dns_resolver(&self) -> &Arc<hickory_resolver::TokioResolver> {
+    pub fn dns_resolver(&self) -> &DnsResolver {
         &self.net.dns_resolver
     }
 
