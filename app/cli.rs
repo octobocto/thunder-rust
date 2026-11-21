@@ -9,8 +9,6 @@ use std::{
 use clap::{Arg, Parser};
 use thunder::types::{Network, THIS_SIDECHAIN};
 
-use crate::util::saturating_pred_level;
-
 #[derive(Clone, Debug)]
 pub struct Config {
     pub add_peers: HashSet<thunder::types::net::PeerAddress>,
@@ -82,6 +80,38 @@ impl Config {
             wallet_dir = %wallet_dir.display(),
             msg,
         )
+    }
+
+    /// The config that [`crate::run`] takes
+    pub fn run_config(&self) -> crate::Config {
+        crate::Config {
+            app: crate::app::Config {
+                add_peers: self.add_peers.clone(),
+                datadir: self.datadir.clone(),
+                mainchain_grpc_url: self.mainchain_grpc_url.clone(),
+                mnemonic_seed_phrase_path: self
+                    .mnemonic_seed_phrase_path
+                    .clone(),
+                net_addr: self.net_addr,
+                network: self.network,
+                network_magic_override: self.network_magic_override,
+                server_names: self.server_names.clone(),
+                wallet_dir: self.wallet_dir.clone(),
+            },
+            private_rpc_addr: self.private_rpc_addr,
+            rpc_addr: self.rpc_addr,
+        }
+    }
+}
+
+/// Saturating predecessor of a log level
+pub fn saturating_pred_level(log_level: tracing::Level) -> tracing::Level {
+    match log_level {
+        tracing::Level::TRACE => tracing::Level::DEBUG,
+        tracing::Level::DEBUG => tracing::Level::INFO,
+        tracing::Level::INFO => tracing::Level::WARN,
+        tracing::Level::WARN => tracing::Level::ERROR,
+        tracing::Level::ERROR => tracing::Level::ERROR,
     }
 }
 
@@ -177,7 +207,7 @@ fn parse_network_magic(s: &str) -> Result<[u8; 4], const_hex::FromHexError> {
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
-pub(super) struct Cli {
+pub struct Cli {
     /// Additional peers to dial on startup, as `host:port`. May be given
     /// more than once, and is dialed in addition to the network's built-in
     /// seed peers.
@@ -238,6 +268,15 @@ pub(super) struct Cli {
 }
 
 impl Cli {
+    /// Parse the command line flags. `args` starts with the program name.
+    pub fn try_parse_args<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        <Self as Parser>::try_parse_from(args)
+    }
+
     pub fn get_config(self) -> anyhow::Result<Config> {
         let datadir = self.datadir.0;
         let log_dir = match self.log_dir {
@@ -278,5 +317,49 @@ impl Cli {
             server_names: HashSet::from_iter(self.server_names),
             wallet_dir,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::path::PathBuf;
+
+    use thunder::types::Network;
+
+    use super::Cli;
+
+    #[test]
+    fn run_config_takes_the_flags() -> anyhow::Result<()> {
+        let config = Cli::try_parse_args([
+            "thunder_app",
+            "--headless",
+            "--datadir=/data/thunder",
+            "--network=regtest",
+            "--rpc-addr=127.0.0.1:16009",
+            "--mainchain-grpc-url=http://127.0.0.1:25550",
+            "--mnemonic-seed-phrase-path=/data/starter.txt",
+        ])?
+        .get_config()?;
+        let run_config = config.run_config();
+        assert_eq!(run_config.app.datadir, PathBuf::from("/data/thunder"));
+        assert_eq!(run_config.app.wallet_dir, PathBuf::from("/data/thunder"));
+        assert_eq!(run_config.app.network, Network::Regtest);
+        assert_eq!(run_config.rpc_addr, "127.0.0.1:16009".parse()?);
+        assert_eq!(
+            run_config.app.mainchain_grpc_url.as_str(),
+            "http://127.0.0.1:25550/"
+        );
+        assert_eq!(
+            run_config.app.mnemonic_seed_phrase_path,
+            Some(PathBuf::from("/data/starter.txt"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn try_parse_args_returns_an_unknown_flag() {
+        assert!(
+            Cli::try_parse_args(["thunder_app", "--no-such-flag"]).is_err()
+        );
     }
 }

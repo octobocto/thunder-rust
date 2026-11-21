@@ -4,23 +4,21 @@ use std::path::Path;
 
 use clap::Parser as _;
 use mimalloc::MiMalloc;
-use thunder_app::app;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use thunder_app::rpc_server;
+use thunder_app::{app, rpc_server};
+use thunder_app::{cli, cli::saturating_pred_level};
 use tokio::signal::ctrl_c;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{
     Layer, filter as tracing_filter, fmt::format, layer::SubscriberExt,
 };
 
-mod cli;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod gui;
 mod line_buffer;
 mod util;
 
 use line_buffer::{LineBuffer, LineBufferWriter};
-use util::saturating_pred_level;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -229,17 +227,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("This platform has no GUI, start with `--headless`");
     }
 
-    let app_config = app::Config {
-        add_peers: config.add_peers,
-        datadir: config.datadir,
-        mainchain_grpc_url: config.mainchain_grpc_url,
-        mnemonic_seed_phrase_path: config.mnemonic_seed_phrase_path,
-        net_addr: config.net_addr,
-        network: config.network,
-        network_magic_override: config.network_magic_override,
-        server_names: config.server_names,
-        wallet_dir: config.wallet_dir,
-    };
+    let run_config = config.run_config();
     let shutdown = CancellationToken::new();
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -248,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             .enable_all()
             .build()?;
         let app =
-            app::App::new(app_config, &runtime, &shutdown).inspect(|app| {
+            app::App::new(run_config.app, &runtime, &shutdown).inspect(|app| {
                 // spawn rpc server
                 app.runtime.spawn({
                 let app = app.clone();
@@ -307,10 +295,5 @@ fn main() -> anyhow::Result<()> {
             })
         })
     };
-    let config = thunder_app::Config {
-        app: app_config,
-        private_rpc_addr: config.private_rpc_addr,
-        rpc_addr: config.rpc_addr,
-    };
-    Ok(thunder_app::run(config, shutdown)?)
+    Ok(thunder_app::run(run_config, shutdown)?)
 }
