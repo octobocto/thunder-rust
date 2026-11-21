@@ -81,6 +81,8 @@ ignore = [
     { id = "RUSTSEC-2025-0141", reason = "Temporary ignore until heed migrates to wincode" },
     { id = "RUSTSEC-2025-0167", reason = "Temporary ignore until imbl drops bitmaps" },
     { id = "RUSTSEC-2026-0247", reason = "Temporary ignore until imbl drops bitmaps" },
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys comes only from the enforcer integration tests, a dev dependency" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono comes only from the enforcer integration tests, a dev dependency" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -106,6 +108,7 @@ allow = [
     "MITNFA",
     "Unicode-3.0",
     "Unlicense",
+    "Zlib",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
