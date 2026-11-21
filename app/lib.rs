@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 
 pub mod app;
+pub mod cli;
 pub mod rpc_server;
 
 #[derive(Debug)]
